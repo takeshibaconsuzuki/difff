@@ -119,3 +119,82 @@ test("comments on wrapped lines retain their original line number", async (t) =>
     await page.close();
   }
 });
+
+test("comment forms stay on the clicked row when files share line numbers", async (t) => {
+  const browser = await chromium.launch({
+    channel: process.env.DIFFF_BROWSER_CHANNEL || undefined,
+    headless: true,
+  });
+  t.after(() => browser.close());
+  const provider = createWebviewProvider();
+  const files = ["src/a-b.ts", "src/a_b.ts"].map((path) => ({
+    path,
+    content: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -10,42 +30,42 @@\n shared context\n-old line\n+new line\n${" more context\n".repeat(40)}`,
+    additions: 1,
+    deletions: 1,
+  }));
+
+  for (const [mode, html] of [
+    [
+      "branch comparison",
+      provider.getAllDiffsContent(files, "main", "feature"),
+    ],
+    ["working directory", provider.getWorkingDirectoryContent(files)],
+  ]) {
+    await t.test(mode, async () => {
+      const page = await browser.newPage({
+        viewport: { width: 640, height: 900 },
+      });
+      try {
+        const errors = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.setContent(
+          html.replace(
+            "<head>",
+            "<head><script>window.messages = []; window.acquireVsCodeApi = () => ({ postMessage(message) { window.messages.push(message); }, getState() {}, setState() {} });</script>",
+          ),
+        );
+
+        for (const [lineType, lineNumber] of [
+          ["context", 30],
+          ["deletion", 11],
+          ["addition", 31],
+        ]) {
+          // Move an existing form between files with identical line coordinates.
+          for (const file of files) {
+            const button = page.locator(
+              `.add-comment-button[data-file-path="${file.path}"][data-line-number="${lineNumber}"][data-line-type="${lineType}"]`,
+            );
+            await button.click();
+            assert.equal(await page.locator(".comment-form-row").count(), 1);
+            assert(
+              await button.evaluate((element) => {
+                const form = document.querySelector(".comment-form-row");
+                return (
+                  form.previousElementSibling === element.closest("tr") &&
+                  form.querySelector(".comment-textarea") ===
+                    document.activeElement
+                );
+              }),
+              `Form should open and receive focus beneath ${file.path}:${lineNumber} (${lineType})`,
+            );
+          }
+
+          const content = `Comment on ${lineType}`;
+          await page.locator(".comment-textarea").fill(content);
+          await page.locator("[data-submit-comment]").click();
+          assert.deepEqual(await page.evaluate(() => window.messages.pop()), {
+            command: "addComment",
+            filePath: files[1].path,
+            lineNumber,
+            lineType,
+            content,
+          });
+        }
+        assert.deepEqual(errors, []);
+      } finally {
+        await page.close();
+      }
+    });
+  }
+});

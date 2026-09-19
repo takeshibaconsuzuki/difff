@@ -897,14 +897,19 @@ export class DiffWebviewProvider {
                 .substring(0, 2);
         }
         
-        function showCommentForm(filePath, lineNumber, lineType) {
-            // Remove any existing form
-            hideCommentForm();
-            
-            const targetRow = document.querySelector(\`tr[data-line-num="\${lineNumber}"][data-line-type="\${lineType}"]\`);
+        function showCommentForm(button) {
+            // Line numbers repeat across files, so use the clicked button's row.
+            const targetRow = button.closest('tr.diff-line');
             if (!targetRow) {
                 return;
             }
+
+            const filePath = button.dataset.filePath;
+            const lineNumber = parseInt(button.dataset.lineNumber);
+            const lineType = button.dataset.lineType;
+
+            // Remove any existing form
+            hideCommentForm();
             
             const threadId = \`\${filePath}-\${lineNumber}-\${lineType}\`;
             currentCommentThreadId = threadId;
@@ -999,10 +1004,7 @@ export class DiffWebviewProvider {
                 // Handle add comment button clicks
                 if (target.classList.contains('add-comment-button')) {
                     event.preventDefault();
-                    const filePath = target.dataset.filePath;
-                    const lineNumber = parseInt(target.dataset.lineNumber);
-                    const lineType = target.dataset.lineType;
-                    showCommentForm(filePath, lineNumber, lineType);
+                    showCommentForm(target);
                 }
                 
                 // Handle comment thread toggle
@@ -2000,14 +2002,19 @@ export class DiffWebviewProvider {
                 .substring(0, 2);
         }
         
-        function showCommentForm(filePath, lineNumber, lineType) {
-            // Remove any existing form
-            hideCommentForm();
-            
-            const targetRow = document.querySelector(\`tr[data-line-num="\${lineNumber}"][data-line-type="\${lineType}"]\`);
+        function showCommentForm(button) {
+            // Line numbers repeat across files, so use the clicked button's row.
+            const targetRow = button.closest('tr.diff-line');
             if (!targetRow) {
                 return;
             }
+
+            const filePath = button.dataset.filePath;
+            const lineNumber = parseInt(button.dataset.lineNumber);
+            const lineType = button.dataset.lineType;
+
+            // Remove any existing form
+            hideCommentForm();
             
             const threadId = \`\${filePath}-\${lineNumber}-\${lineType}\`;
             currentCommentThreadId = threadId;
@@ -2102,10 +2109,7 @@ export class DiffWebviewProvider {
                 // Handle add comment button clicks
                 if (target.classList.contains('add-comment-button')) {
                     event.preventDefault();
-                    const filePath = target.dataset.filePath;
-                    const lineNumber = parseInt(target.dataset.lineNumber);
-                    const lineType = target.dataset.lineType;
-                    showCommentForm(filePath, lineNumber, lineType);
+                    showCommentForm(target);
                 }
                 
                 // Handle comment thread toggle
