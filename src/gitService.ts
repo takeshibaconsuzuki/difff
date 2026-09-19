@@ -1,8 +1,10 @@
 import * as vscode from "vscode";
 import simpleGit, { SimpleGit, DiffResult } from "simple-git";
+import { execFile } from "child_process";
 
 export class GitService {
   private git: SimpleGit;
+  private repositoryRoot?: Promise<string>;
 
   constructor() {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -228,12 +230,16 @@ export class GitService {
 
   async getWorkingDirectoryDiff(): Promise<string> {
     try {
-      // Get diff for staged and unstaged changes
-      const stagedDiff = await this.git.diff(["--staged"]);
-      const unstagedDiff = await this.git.diff();
-
-      // Combine both diffs
-      return stagedDiff + "\n" + unstagedDiff;
+      const files = await this.getWorkingDirectoryFiles();
+      const diffs = await Promise.all(
+        files.map((file) =>
+          this.getWorkingDirectoryFileDiff(
+            file.path,
+            file.status === "untracked",
+          ),
+        ),
+      );
+      return diffs.filter(Boolean).join("\n");
     } catch (error) {
       console.error("Error getting working directory diff:", error);
       return "";
@@ -249,19 +255,9 @@ export class GitService {
     }>
   > {
     try {
-      // Add timeout for git status
-      const timeoutPromise = new Promise<string>((_, reject) => {
-        setTimeout(
-          () =>
-            reject(
-              new Error("Git status operation timed out after 30 seconds"),
-            ),
-          30000,
-        );
-      });
-
-      const statusPromise = this.git.raw(["status", "--short"]);
-      const shortStatus = await Promise.race([statusPromise, timeoutPromise]);
+      const git = await this.getWorkingTreeGit();
+      // simple-git parses NUL-delimited porcelain, including quoted paths and renames.
+      const status = await git.status(["--untracked-files=all"]);
 
       const files: Array<{
         path: string;
@@ -270,34 +266,33 @@ export class GitService {
         deletions: number;
       }> = [];
 
-      // Parse each line of git status --short output
-      const lines = shortStatus.split("\n").filter((line) => line.trim());
-
-      for (const line of lines) {
-        if (line.length < 3) continue; // Skip invalid lines
-
-        const statusCode = line.substring(0, 2);
-        const filePath = line.substring(3); // Skip the space after status code
-        const fileStatus = this.parseShortStatus(statusCode);
+      for (const file of status.files) {
+        const filePath = file.path;
+        const fileStatus = this.parseShortStatus(file.index + file.working_dir);
 
         // Get diff stats for the file
         let additions = 0;
         let deletions = 0;
 
         try {
-          // Only get diff stats for tracked files (not untracked)
-          if (fileStatus !== "untracked") {
-            const fileDiff = await this.getWorkingDirectoryFileDiff(filePath);
-            const diffLines = fileDiff.split("\n");
-            for (const diffLine of diffLines) {
-              if (diffLine.startsWith("+") && !diffLine.startsWith("+++"))
+          const fileDiff = await this.getWorkingDirectoryFileDiff(
+            filePath,
+            fileStatus === "untracked",
+          );
+          let inHunk = false;
+          for (const diffLine of fileDiff.split("\n")) {
+            if (diffLine.startsWith("diff --git ")) {
+              inHunk = false;
+            } else if (diffLine.startsWith("@@ ")) {
+              inHunk = true;
+            } else if (inHunk) {
+              if (diffLine.startsWith("+")) {
                 additions++;
-              if (diffLine.startsWith("-") && !diffLine.startsWith("---"))
+              }
+              if (diffLine.startsWith("-")) {
                 deletions++;
+              }
             }
-          } else {
-            // For untracked files, we could count lines in the file as additions
-            // but for now, we'll leave them as 0/0 to be consistent with git behavior
           }
         } catch (err) {
           // If we can't get diff stats, use defaults (0/0)
@@ -319,26 +314,85 @@ export class GitService {
     }
   }
 
-  async getWorkingDirectoryFileDiff(filePath: string): Promise<string> {
+  private getRepositoryRoot(): Promise<string> {
+    this.repositoryRoot ??= this.git
+      .revparse(["--show-toplevel"])
+      .then((root) => root.trim());
+    return this.repositoryRoot;
+  }
+
+  private async getWorkingTreeGit(): Promise<SimpleGit> {
+    // Porcelain paths are relative to the repository root, even for a nested workspace.
+    return simpleGit({
+      baseDir: await this.getRepositoryRoot(),
+      timeout: { block: 30000 },
+    });
+  }
+
+  private async getUntrackedFileDiff(filePath: string): Promise<string> {
+    const root = await this.getRepositoryRoot();
+    return new Promise((resolve, reject) => {
+      execFile(
+        "git",
+        [
+          "diff",
+          "--no-index",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-color",
+          "--",
+          "/dev/null",
+          filePath,
+        ],
+        {
+          cwd: root,
+          encoding: "utf8",
+          timeout: 30000,
+          maxBuffer: 50 * 1024 * 1024,
+          windowsHide: true,
+        },
+        (error, stdout) => {
+          // --no-index returns 1 for a successful comparison that found differences.
+          if (error && error.code !== 1) {
+            reject(error);
+          } else {
+            resolve(stdout);
+          }
+        },
+      );
+    });
+  }
+
+  async getWorkingDirectoryFileDiff(
+    filePath: string,
+    untracked?: boolean,
+  ): Promise<string> {
     try {
-      // Add timeout for diff operations
-      const timeoutPromise = new Promise<string>((_, reject) => {
-        setTimeout(
-          () =>
-            reject(new Error("Git diff operation timed out after 30 seconds")),
-          30000,
-        );
-      });
+      const git = await this.getWorkingTreeGit();
+      const literalPath = `:(literal)${filePath}`;
+      if (untracked === undefined) {
+        const untrackedPaths = await git.raw([
+          "ls-files",
+          "--others",
+          "--exclude-standard",
+          "-z",
+          "--",
+          literalPath,
+        ]);
+        untracked = untrackedPaths.split("\0").includes(filePath);
+      }
+      if (untracked) {
+        return await this.getUntrackedFileDiff(filePath);
+      }
 
-      // Try to get staged diff first, then unstaged
-      const stagedPromise = this.git.diff(["--staged", "--", filePath]);
-      const stagedDiff = await Promise.race([stagedPromise, timeoutPromise]);
-
-      const unstagedPromise = this.git.diff(["--", filePath]);
-      const unstagedDiff = await Promise.race([
-        unstagedPromise,
-        timeoutPromise,
+      const diffOptions = ["--no-ext-diff", "--no-textconv", "--no-color"];
+      const stagedDiff = await git.diff([
+        ...diffOptions,
+        "--staged",
+        "--",
+        literalPath,
       ]);
+      const unstagedDiff = await git.diff([...diffOptions, "--", literalPath]);
 
       // Combine both diffs
       let combinedDiff = "";

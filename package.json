@@ -1,12 +1,13 @@
 {
   "name": "difff",
-  "displayName": "Difff - GitHub-like Git Diff Viewer",
+  "displayName": "Difff - GitHub-like Git Diff Viewer (local fork)",
   "description": "View git diffs in a GitHub-like interface with branch selection",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "license": "MIT",
   "publisher": "knsh14",
   "repository": {
     "type": "git",
-    "url": "https://github.com/knsh14/difff"
+    "url": "https://github.com/takeshibaconsuzuki/difff"
   },
   "engines": {
     "vscode": "^1.74.0"
@@ -165,14 +166,17 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node --test test/*.test.cjs",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "16.x",
     "@types/vscode": "^1.74.0",
     "@typescript-eslint/eslint-plugin": "^5.45.0",
     "@typescript-eslint/parser": "^5.45.0",
+    "@vscode/vsce": "^4.0.0",
     "eslint": "^8.28.0",
+    "playwright": "^1.63.0",
     "prettier": "^3.6.2",
     "typescript": "^4.9.3"
   },

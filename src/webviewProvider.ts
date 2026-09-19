@@ -11,6 +11,56 @@ export interface FileDiff {
 export class DiffWebviewProvider {
   constructor(private readonly extensionUri: vscode.Uri) {}
 
+  private getDiffLayoutStyles(): string {
+    return `
+        .diff-container, .file-diff {
+            overflow-x: auto;
+        }
+        .diff-table {
+            table-layout: fixed;
+        }
+        .diff-gutter {
+            width: 60px;
+        }
+        .diff-line-num {
+            vertical-align: top;
+        }
+        .diff-line-content {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .diff-hunk-header, .file-header h2 {
+            overflow-wrap: anywhere;
+        }
+        .file-header h2 {
+            min-width: 0;
+        }
+        .file-header {
+            gap: 12px;
+        }
+        .file-stats {
+            flex-shrink: 0;
+        }
+    `;
+  }
+
+  private getDiffColumns(): string {
+    return '<colgroup><col class="diff-gutter"><col class="diff-gutter"><col></colgroup>';
+  }
+
+  private getEmptyDiffMessage(content: string): string {
+    if (
+      /^Binary files .* differ$/m.test(content) ||
+      /^GIT binary patch$/m.test(content)
+    ) {
+      return "Binary file contents are not displayed";
+    }
+    if (/^new file mode /m.test(content)) {
+      return "New empty file";
+    }
+    return "No changes in this file";
+  }
+
   getWebviewContent(diffContent: string, fileName: string): string {
     const lines = diffContent.split("\n");
     const hunks = this.parseDiff(lines);
@@ -132,6 +182,7 @@ export class DiffWebviewProvider {
             text-align: center;
             color: var(--vscode-descriptionForeground);
         }
+        ${this.getDiffLayoutStyles()}
     </style>
 </head>
 <body>
@@ -143,7 +194,7 @@ export class DiffWebviewProvider {
         </div>
     </div>
     
-    ${hunks.length > 0 ? this.renderDiff(hunks) : '<div class="empty-diff">No changes in this file</div>'}
+    ${hunks.length > 0 ? this.renderDiff(hunks) : `<div class="empty-diff">${this.getEmptyDiffMessage(diffContent)}</div>`}
 </body>
 </html>`;
   }
@@ -155,7 +206,12 @@ export class DiffWebviewProvider {
     let newLineNum = 0;
 
     for (const line of lines) {
-      if (line.startsWith("@@")) {
+      if (line.startsWith("diff --git ")) {
+        if (currentHunk) {
+          hunks.push(currentHunk);
+          currentHunk = null;
+        }
+      } else if (line.startsWith("@@")) {
         if (currentHunk) {
           hunks.push(currentHunk);
         }
@@ -185,7 +241,7 @@ export class DiffWebviewProvider {
             oldLineNum: oldLineNum++,
             newLineNum: "",
           });
-        } else if (line.startsWith(" ") || line === "") {
+        } else if (line.startsWith(" ")) {
           currentHunk.lines.push({
             type: "context",
             content: line.substring(1),
@@ -204,7 +260,7 @@ export class DiffWebviewProvider {
   }
 
   private renderDiff(hunks: any[]): string {
-    let html = '<div class="diff-container"><table class="diff-table"><tbody>';
+    let html = `<div class="diff-container"><table class="diff-table">${this.getDiffColumns()}<tbody>`;
 
     for (const hunk of hunks) {
       html += `<tr><td colspan="3" class="diff-hunk-header">${this.escapeHtml(hunk.header)}</td></tr>`;
@@ -758,6 +814,7 @@ export class DiffWebviewProvider {
         .comment-item.deleted {
             display: none;
         }
+        ${this.getDiffLayoutStyles()}
     </style>
 </head>
 <body>
@@ -1795,6 +1852,7 @@ export class DiffWebviewProvider {
         .comment-item.deleted {
             display: none;
         }
+        ${this.getDiffLayoutStyles()}
     </style>
 </head>
 <body>
@@ -2292,8 +2350,8 @@ export class DiffWebviewProvider {
             </div>
             ${
               hunks.length > 0
-                ? `<table class="diff-table"><tbody>${this.renderHunks(hunks, file.path, comments, baseRef, compareRef)}</tbody></table>`
-                : '<div class="no-changes">No changes in this file</div>'
+                ? `<table class="diff-table">${this.getDiffColumns()}<tbody>${this.renderHunks(hunks, file.path, comments, baseRef, compareRef)}</tbody></table>`
+                : `<div class="no-changes">${this.getEmptyDiffMessage(file.content)}</div>`
             }
         </div>`;
   }

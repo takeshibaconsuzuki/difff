@@ -1,5 +1,17 @@
 # Difff - GitHub-like Git Diff Viewer
 
+This local fork fixes clipped long lines and displays untracked file contents in Working Directory Changes. Lines wrap automatically, including long strings without spaces. Untracked text files appear as additions without staging them; empty and binary files show explicit messages. The extension ID stays `knsh14.difff` so installing this build updates the existing extension and preserves its saved comments.
+
+To build and install this fork with Node.js 22 or newer:
+
+```sh
+npm ci
+npm run package
+code --install-extension difff-1.0.1.vsix --force
+```
+
+Run `npm exec playwright install chromium` once, then `npm test` for Git integration and browser layout tests. To use an installed Chrome or Edge instead, set `DIFFF_BROWSER_CHANNEL` to `chrome` or `msedge` when running the tests. After installing the VSIX, run **Developer: Reload Window** in VS Code and reopen the diff.
+
 A Visual Studio Code extension that provides a GitHub-like interface for viewing git diffs with branch/tag/commit selection.
 
 ## Features
