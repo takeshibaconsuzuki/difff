@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import { DiffComment } from "./commentService";
+import { getWebviewScript } from "./webviewScript";
+import { webviewStyles } from "./webviewStyles";
 
 export interface FileDiff {
   path: string;
@@ -8,44 +10,321 @@ export interface FileDiff {
   deletions: number;
 }
 
+interface DiffLine {
+  type: "addition" | "deletion" | "context";
+  content: string;
+  oldLineNum: number | "";
+  newLineNum: number | "";
+}
+
+interface DiffHunk {
+  header: string;
+  lines: DiffLine[];
+}
+
+type ViewMode = "branch" | "working" | "single";
+
+const iconPaths = {
+  diff: '<path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M7 8h4M9 6v4M13 16h4"/>',
+  branch:
+    '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10M18 7a8 8 0 0 1-8 8H6"/>',
+  arrow: '<path d="M4 12h16m-5-5 5 5-5 5"/>',
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8M8 17h6"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  refresh:
+    '<path d="M20 7v5h-5M4 17v-5h5M6.1 6a8 8 0 0 1 13.4 3M4.5 15A8 8 0 0 0 18 18"/>',
+  comment:
+    '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l-2 2V11.5a9.5 9.5 0 0 1 19 0zM7 9h9M7 13h6"/>',
+  open: '<path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  code: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16"/>',
+};
+
 export class DiffWebviewProvider {
   constructor(private readonly extensionUri: vscode.Uri) {}
 
-  private getDiffLayoutStyles(): string {
-    return `
-        .diff-container, .file-diff {
-            overflow-x: auto;
-        }
-        .diff-table {
-            table-layout: fixed;
-        }
-        .diff-gutter {
-            width: 60px;
-        }
-        .diff-line-num {
-            vertical-align: top;
-        }
-        .diff-line-content {
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-        }
-        .diff-hunk-header, .file-header h2 {
-            overflow-wrap: anywhere;
-        }
-        .file-header h2 {
-            min-width: 0;
-        }
-        .file-header {
-            gap: 12px;
-        }
-        .file-stats {
-            flex-shrink: 0;
-        }
-    `;
+  getWebviewContent(diffContent: string, fileName: string): string {
+    const lines = this.parseDiff(diffContent.split("\n")).flatMap(
+      (hunk) => hunk.lines,
+    );
+    return this.generateDiffHTML(
+      [
+        {
+          path: fileName,
+          content: diffContent,
+          additions: lines.filter((line) => line.type === "addition").length,
+          deletions: lines.filter((line) => line.type === "deletion").length,
+        },
+      ],
+      "single",
+    );
   }
 
-  private getDiffColumns(): string {
-    return '<colgroup><col class="diff-gutter"><col class="diff-gutter"><col></colgroup>';
+  getAllDiffsContent(
+    fileDiffs: FileDiff[],
+    baseRef?: string,
+    compareRef?: string,
+    comments: Map<string, DiffComment[]> = new Map(),
+    currentUser?: string,
+  ): string {
+    return this.generateDiffHTML(
+      fileDiffs,
+      "branch",
+      baseRef,
+      compareRef,
+      comments,
+      currentUser,
+    );
+  }
+
+  getWorkingDirectoryContent(
+    fileDiffs: FileDiff[],
+    comments: Map<string, DiffComment[]> = new Map(),
+    currentUser?: string,
+  ): string {
+    return this.generateDiffHTML(
+      fileDiffs,
+      "working",
+      "HEAD",
+      "working",
+      comments,
+      currentUser,
+    );
+  }
+
+  private icon(name: keyof typeof iconPaths, className = ""): string {
+    return `<svg class="icon ${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name]}</svg>`;
+  }
+
+  private fileId(path: string): string {
+    // Keep paths like a-b.ts and a_b.ts distinct, including non-ASCII names.
+    return `file-${Buffer.from(path, "utf8").toString("hex")}`;
+  }
+
+  private changeBar(additions: number, deletions: number): string {
+    const total = additions + deletions;
+    return `<span class="change-bar" aria-hidden="true"><span class="added-bar" style="width:${total ? (additions / total) * 100 : 0}%"></span><span class="removed-bar" style="width:${total ? (deletions / total) * 100 : 0}%"></span></span>`;
+  }
+
+  private fileStatus(content: string): { label: string; code: string } {
+    if (/^new file mode /m.test(content)) {
+      return { label: "Added", code: "A" };
+    }
+    if (/^deleted file mode /m.test(content)) {
+      return { label: "Deleted", code: "D" };
+    }
+    if (/^rename from /m.test(content)) {
+      return { label: "Renamed", code: "R" };
+    }
+    return { label: "Modified", code: "M" };
+  }
+
+  private generateDiffHTML(
+    fileDiffs: FileDiff[],
+    mode: ViewMode,
+    baseRef?: string,
+    compareRef?: string,
+    comments: Map<string, DiffComment[]> = new Map(),
+    currentUser = "User",
+  ): string {
+    const additions = fileDiffs.reduce((sum, file) => sum + file.additions, 0);
+    const deletions = fileDiffs.reduce((sum, file) => sum + file.deletions, 0);
+    const commentCount = fileDiffs.reduce(
+      (sum, file) => sum + (comments.get(file.path)?.length || 0),
+      0,
+    );
+    const title =
+      mode === "working"
+        ? "Working changes"
+        : mode === "single"
+          ? "File changes"
+          : "Compare changes";
+    const viewKey = JSON.stringify([
+      mode,
+      baseRef,
+      compareRef,
+      mode === "single" ? fileDiffs[0]?.path : "",
+    ]);
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${this.escapeHtml(title)} · Difff</title>
+    <style>${webviewStyles}</style>
+</head>
+<body>
+    <header class="page-header">
+        <div class="header-top">
+            <div class="heading">
+                <div class="brand-mark">${this.icon("diff")}</div>
+                <div><div class="eyebrow">DIFFF / CODE REVIEW</div><h1>${title}</h1></div>
+            </div>
+            ${
+              mode !== "single"
+                ? `<div class="header-actions">
+                <button class="button subtle" id="copy-comments-btn" title="Copy all comments" aria-label="Copy all comments" ${commentCount === 0 ? "disabled" : ""}>
+                    ${this.icon("comment")}<span class="button-label">Copy comments <span class="comment-count">${commentCount}</span></span>
+                </button>
+                <button class="button" id="reload-diff-btn" title="Refresh changes" aria-label="Refresh changes">
+                    ${this.icon("refresh")}<span class="button-label">Refresh</span>
+                </button>
+            </div>`
+                : ""
+            }
+        </div>
+        <div class="comparison" aria-label="Comparison">
+            ${
+              mode === "single"
+                ? `<span class="ref">${this.icon("file")}<span>${this.escapeHtml(fileDiffs[0]?.path || "")}</span></span>`
+                : `
+            <span class="ref" title="Base reference">${this.icon("branch")}<span>${this.escapeHtml(baseRef || "Base")}</span></span>
+            ${this.icon("arrow")}
+            <span class="ref" title="Compare reference">${this.icon(mode === "working" ? "code" : "branch")}<span>${this.escapeHtml(mode === "working" ? "Working directory" : compareRef || "Compare")}</span></span>
+            <span class="comparison-note">${mode === "working" ? "Your changes since the last commit" : "Review what changed between references"}</span>`
+            }
+        </div>
+        <div class="summary">
+            <div class="summary-counts">
+                <span><strong>${fileDiffs.length}</strong> <span class="muted">${fileDiffs.length === 1 ? "file" : "files"} changed</span></span>
+                <span class="additions"><strong>+${additions}</strong> additions</span>
+                <span class="deletions"><strong>−${deletions}</strong> deletions</span>
+                ${this.changeBar(additions, deletions)}
+            </div>
+            <span class="summary-note">${this.icon("code")} Unified diff</span>
+        </div>
+    </header>
+    <div class="review-layout">
+        <aside class="file-sidebar" aria-label="Changed files">
+            <div class="sidebar-heading"><h2>Files changed</h2><span class="count-badge">${fileDiffs.length}</span></div>
+            <label class="search-box">${this.icon("search")}<span class="sr-only">Filter files</span><input type="search" id="file-search" placeholder="Filter files…" autocomplete="off" spellcheck="false"></label>
+            <nav class="file-list" aria-label="File navigation">
+                ${fileDiffs.map((file) => this.renderFileLink(file)).join("")}
+            </nav>
+            <div class="sidebar-footer">${mode === "single" ? "Select a file to jump to its changes." : "Select a line’s + to leave a comment."}</div>
+        </aside>
+        <main class="content" id="changes">
+            <div class="content-toolbar">
+                <h2 id="visible-files">Changed files</h2>
+                <div class="toolbar-actions"><span class="view-label">Lines wrap automatically</span><button class="button subtle" id="collapse-all">Collapse all</button></div>
+            </div>
+            <div class="empty-diff" id="no-matches" hidden>
+                <div class="empty-icon">${this.icon("search")}</div><h2>No matching files</h2><p>Try a different filename or path.</p><button class="button" id="clear-filter">Clear filter</button>
+            </div>
+            ${fileDiffs.length === 0 ? `<div class="empty-diff"><div class="empty-icon">${this.icon("check")}</div><h2>${mode === "working" ? "Your working directory is clean" : "No changes to review"}</h2><p>${mode === "working" ? "Changes you make will appear here." : "These references have the same file contents."}</p></div>` : fileDiffs.map((file) => this.renderFileDiff(file, comments.get(file.path) || [], mode !== "single")).join("")}
+        </main>
+    </div>
+    <div id="review-status" class="sr-only" role="status" aria-live="polite"></div>
+    <script>${getWebviewScript(currentUser, viewKey)}</script>
+</body>
+</html>`;
+  }
+
+  private renderFileLink(file: FileDiff): string {
+    const slash = file.path.lastIndexOf("/");
+    const directory = file.path.slice(0, slash + 1);
+    const name = file.path.slice(slash + 1);
+    const status = this.fileStatus(file.content);
+    return `<a class="file-link" href="#${this.fileId(file.path)}" data-file-path="${this.escapeHtml(file.path)}" title="${this.escapeHtml(file.path)} (+${file.additions} −${file.deletions})">
+        ${this.icon("file")}<span class="nav-file-label"><span class="nav-filename">${this.escapeHtml(name)}</span>${directory ? `<span class="nav-directory">${this.escapeHtml(directory)}</span>` : ""}</span>
+        <span class="file-status status-${status.label.toLowerCase()}" aria-label="${status.label}" title="${status.label}">${status.code}</span>
+    </a>`;
+  }
+
+  private renderFileDiff(
+    file: FileDiff,
+    comments: DiffComment[],
+    interactive: boolean,
+  ): string {
+    const hunks = this.parseDiff(file.content.split("\n"));
+    const fileId = this.fileId(file.path);
+    const path = this.escapeHtml(file.path);
+    const slash = file.path.lastIndexOf("/");
+    return `<section class="file-diff" id="${fileId}" data-file-path="${path}" aria-label="${path}">
+        <div class="file-header">
+            <button class="icon-button file-toggle" aria-expanded="true" aria-controls="${fileId}-body" aria-label="Collapse ${path}">${this.icon("chevron")}</button>
+            ${this.icon("file", "file-type-icon muted")}
+            <h3><button class="file-header-title" data-open-file="${path}" title="Open ${path} in editor"><span class="file-directory">${this.escapeHtml(file.path.slice(0, slash + 1))}</span><span class="file-name">${this.escapeHtml(file.path.slice(slash + 1))}</span></button></h3>
+            <div class="file-stats"><span class="additions" aria-label="${file.additions} additions">+${file.additions}</span><span class="deletions" aria-label="${file.deletions} deletions">−${file.deletions}</span>${this.changeBar(file.additions, file.deletions)}</div>
+            <button class="icon-button" data-open-file="${path}" title="Open in editor" aria-label="Open ${path} in editor">${this.icon("open")}</button>
+        </div>
+        <div class="file-body" id="${fileId}-body">
+            ${hunks.length ? `<table class="diff-table" aria-label="Changes in ${path}"><colgroup><col class="diff-gutter"><col class="diff-gutter"><col></colgroup><tbody>${this.renderHunks(hunks, file.path, comments, interactive)}</tbody></table>` : `<div class="no-changes">${this.getEmptyDiffMessage(file.content)}</div>`}
+        </div>
+    </section>`;
+  }
+
+  private renderHunks(
+    hunks: DiffHunk[],
+    filePath: string,
+    comments: DiffComment[],
+    interactive: boolean,
+  ): string {
+    return hunks
+      .map((hunk) => {
+        const header = `<tr><td colspan="3" class="diff-hunk-header">${this.escapeHtml(hunk.header)}</td></tr>`;
+        return (
+          header +
+          hunk.lines
+            .map((line) => {
+              const lineNumber = line.newLineNum || line.oldLineNum;
+              const commentButton =
+                interactive && lineNumber
+                  ? `<button class="add-comment-button" data-file-path="${this.escapeHtml(filePath)}" data-line-number="${lineNumber}" data-line-type="${line.type}" title="Add a comment" aria-label="Comment on ${this.escapeHtml(filePath)} line ${lineNumber} (${line.type})">+</button>`
+                  : "";
+              let html = `<tr class="diff-line diff-line-${line.type}" data-line-num="${lineNumber}" data-line-type="${line.type}">
+            <td class="diff-line-num"><div class="diff-line-wrapper">${commentButton}${line.oldLineNum}</div></td>
+            <td class="diff-line-num">${line.newLineNum}</td>
+            <td class="diff-line-content">${this.escapeHtml(line.content)}</td>
+        </tr>`;
+              const lineComments = comments.filter(
+                (comment) =>
+                  comment.lineNumber === lineNumber &&
+                  comment.lineType === line.type,
+              );
+              if (lineComments.length) {
+                const threadId = `${this.fileId(filePath)}-${lineNumber}-${line.type}`;
+                html += `<tr class="comment-thread-row"><td colspan="3">
+            <div class="comment-thread-container" data-thread-id="${threadId}">
+                <button class="comment-thread-header" data-toggle-thread="${threadId}" aria-expanded="true" aria-controls="${threadId}-comments"><span class="comment-thread-toggle" aria-hidden="true">▼</span><span class="thread-count">${lineComments.length} comment${lineComments.length === 1 ? "" : "s"}</span></button>
+                <div class="comment-thread-body" id="${threadId}-comments">${lineComments.map((comment) => this.renderComment(comment)).join("")}</div>
+            </div>
+          </td></tr>`;
+              }
+              return html;
+            })
+            .join("")
+        );
+      })
+      .join("");
+  }
+
+  private renderComment(comment: DiffComment): string {
+    const timestamp = new Date(comment.timestamp).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    const initials = comment.author
+      .split(" ")
+      .map((name) => name.charAt(0).toUpperCase())
+      .join("")
+      .slice(0, 2);
+    const id = this.escapeHtml(comment.id);
+    return `<div class="comment-item" data-comment-id="${id}">
+        <div class="comment-avatar" aria-hidden="true">${this.escapeHtml(initials)}</div>
+        <div class="comment-body">
+            <div class="comment-header"><span class="comment-author">${this.escapeHtml(comment.author)}</span><span class="comment-timestamp">${timestamp}</span></div>
+            <div class="comment-content">${this.escapeHtml(comment.content)}</div>
+            <div class="comment-actions-menu">
+                <button class="comment-action-btn" data-copy-comment="${this.escapeHtml(JSON.stringify(comment))}">Copy</button>
+                <button class="comment-action-btn" data-edit-comment="${id}">Edit</button>
+                <button class="comment-action-btn" data-delete-comment="${id}">Delete</button>
+            </div>
+        </div>
+    </div>`;
   }
 
   private getEmptyDiffMessage(content: string): string {
@@ -58,153 +337,20 @@ export class DiffWebviewProvider {
     if (/^new file mode /m.test(content)) {
       return "New empty file";
     }
+    if (/^rename from /m.test(content)) {
+      return "File renamed without content changes";
+    }
+    if (/^old mode /m.test(content)) {
+      return "File permissions changed; contents are unchanged";
+    }
     return "No changes in this file";
   }
 
-  getWebviewContent(diffContent: string, fileName: string): string {
-    const lines = diffContent.split("\n");
-    const hunks = this.parseDiff(lines);
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Diff View</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: var(--vscode-editor-background);
-            color: var(--vscode-editor-foreground);
-        }
-        
-        .diff-header {
-            padding: 16px;
-            background: var(--vscode-editorWidget-background);
-            border: 1px solid var(--vscode-editorWidget-border);
-            border-radius: 6px;
-            margin-bottom: 16px;
-        }
-        
-        .diff-header h2 {
-            margin: 0 0 8px 0;
-            font-size: 16px;
-            font-weight: 600;
-        }
-        
-        .diff-stats {
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            font-size: 12px;
-        }
-        
-        .additions {
-            color: #3fb950;
-        }
-        
-        .deletions {
-            color: #f85149;
-        }
-        
-        .diff-container {
-            border: 1px solid var(--vscode-editorWidget-border);
-            border-radius: 6px;
-            overflow: hidden;
-        }
-        
-        .diff-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-            font-size: 12px;
-            line-height: 20px;
-        }
-        
-        .diff-line {
-            position: relative;
-        }
-        
-        .diff-line-num {
-            width: 1%;
-            min-width: 50px;
-            padding: 0 10px;
-            text-align: right;
-            color: var(--vscode-editorLineNumber-foreground);
-            background: var(--vscode-editorGutter-background);
-            user-select: none;
-            border-right: 1px solid var(--vscode-editorWidget-border);
-        }
-        
-        .diff-line-content {
-            padding: 0 10px;
-            white-space: pre;
-            word-wrap: break-word;
-        }
-        
-        .diff-line-addition {
-            background: rgba(63, 185, 80, 0.15);
-        }
-        
-        .diff-line-addition .diff-line-content::before {
-            content: "+";
-            position: absolute;
-            left: 0;
-            color: #3fb950;
-        }
-        
-        .diff-line-deletion {
-            background: rgba(248, 81, 73, 0.15);
-        }
-        
-        .diff-line-deletion .diff-line-content::before {
-            content: "-";
-            position: absolute;
-            left: 0;
-            color: #f85149;
-        }
-        
-        .diff-line-context {
-            color: var(--vscode-editor-foreground);
-        }
-        
-        .diff-hunk-header {
-            background: var(--vscode-diffEditor-unchangedRegionBackground);
-            color: var(--vscode-descriptionForeground);
-            font-weight: bold;
-            padding: 4px 10px;
-        }
-        
-        .empty-diff {
-            padding: 40px;
-            text-align: center;
-            color: var(--vscode-descriptionForeground);
-        }
-        ${this.getDiffLayoutStyles()}
-    </style>
-</head>
-<body>
-    <div class="diff-header">
-        <h2>${this.escapeHtml(fileName)}</h2>
-        <div class="diff-stats">
-            <span class="additions">+${this.countAdditions(hunks)} additions</span>
-            <span class="deletions">-${this.countDeletions(hunks)} deletions</span>
-        </div>
-    </div>
-    
-    ${hunks.length > 0 ? this.renderDiff(hunks) : `<div class="empty-diff">${this.getEmptyDiffMessage(diffContent)}</div>`}
-</body>
-</html>`;
-  }
-
-  private parseDiff(lines: string[]): any[] {
-    const hunks = [];
-    let currentHunk: any = null;
+  private parseDiff(lines: string[]): DiffHunk[] {
+    const hunks: DiffHunk[] = [];
+    let currentHunk: DiffHunk | null = null;
     let oldLineNum = 0;
     let newLineNum = 0;
-
     for (const line of lines) {
       if (line.startsWith("diff --git ")) {
         if (currentHunk) {
@@ -215,17 +361,12 @@ export class DiffWebviewProvider {
         if (currentHunk) {
           hunks.push(currentHunk);
         }
-
         const match = line.match(/@@ -(\d+),?\d* \+(\d+),?\d* @@/);
         if (match) {
           oldLineNum = parseInt(match[1]);
           newLineNum = parseInt(match[2]);
         }
-
-        currentHunk = {
-          header: line,
-          lines: [],
-        };
+        currentHunk = { header: line, lines: [] };
       } else if (currentHunk) {
         if (line.startsWith("+")) {
           currentHunk.lines.push({
@@ -251,2226 +392,20 @@ export class DiffWebviewProvider {
         }
       }
     }
-
     if (currentHunk) {
       hunks.push(currentHunk);
     }
-
     return hunks;
   }
 
-  private renderDiff(hunks: any[]): string {
-    let html = `<div class="diff-container"><table class="diff-table">${this.getDiffColumns()}<tbody>`;
-
-    for (const hunk of hunks) {
-      html += `<tr><td colspan="3" class="diff-hunk-header">${this.escapeHtml(hunk.header)}</td></tr>`;
-
-      for (const line of hunk.lines) {
-        const lineClass = `diff-line-${line.type}`;
-        html += `
-                    <tr class="diff-line ${lineClass}">
-                        <td class="diff-line-num">${line.oldLineNum}</td>
-                        <td class="diff-line-num">${line.newLineNum}</td>
-                        <td class="diff-line-content">${this.escapeHtml(line.content)}</td>
-                    </tr>
-                `;
-      }
-    }
-
-    html += "</tbody></table></div>";
-    return html;
-  }
-
-  private countAdditions(hunks: any[]): number {
-    let count = 0;
-    for (const hunk of hunks) {
-      count += hunk.lines.filter((l: any) => l.type === "addition").length;
-    }
-    return count;
-  }
-
-  private countDeletions(hunks: any[]): number {
-    let count = 0;
-    for (const hunk of hunks) {
-      count += hunk.lines.filter((l: any) => l.type === "deletion").length;
-    }
-    return count;
-  }
-
   private escapeHtml(text: string): string {
-    const map: any = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
-    return text.replace(/[&<>"']/g, (m) => map[m]);
-  }
-
-  getAllDiffsContent(
-    fileDiffs: FileDiff[],
-    baseRef?: string,
-    compareRef?: string,
-    comments: Map<string, DiffComment[]> = new Map(),
-    currentUser?: string,
-  ): string {
-    const allFilesHtml = fileDiffs
-      .map((file) =>
-        this.renderFileDiff(
-          file,
-          comments.get(file.path) || [],
-          baseRef,
-          compareRef,
-        ),
-      )
-      .join("");
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Diff View</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica', 'Arial', sans-serif;
-            margin: 0;
-            padding: 0;
-            background-color: var(--vscode-editor-background);
-            color: var(--vscode-editor-foreground);
-        }
-
-        .header {
-            position: sticky;
-            top: 0;
-            background-color: var(--vscode-editor-background);
-            border-bottom: 1px solid var(--vscode-panel-border);
-            padding: 12px 16px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            z-index: 10;
-        }
-
-        .header h1 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 600;
-        }
-
-        .header-actions {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .reload-btn {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: background-color 0.2s;
-        }
-
-        .reload-btn:hover:not(.loading) {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-
-        .reload-btn.loading {
-            cursor: not-allowed;
-            opacity: 0.7;
-        }
-
-        .reload-btn.loading span:first-child {
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .copy-comments-btn {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            background-color: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: background-color 0.2s;
-        }
-
-        .copy-comments-btn:hover {
-            background-color: var(--vscode-button-secondaryHoverBackground);
-        }
-
-        .file-diff {
-            margin: 0 16px 24px 16px;
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 6px;
-            overflow: hidden;
-        }
-
-        .file-header {
-            background-color: var(--vscode-editorGroupHeader-tabsBackground);
-            padding: 8px 16px;
-            border-bottom: 1px solid var(--vscode-panel-border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .file-header h2 {
-            margin: 0;
-            font-size: 14px;
-            font-weight: 600;
-            font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-        }
-
-        .file-header-title {
-            cursor: pointer;
-            transition: color 0.2s;
-        }
-
-        .file-header-title:hover {
-            color: var(--vscode-textLink-foreground);
-            text-decoration: underline;
-        }
-
-        .file-stats {
-            display: flex;
-            gap: 8px;
-            font-size: 12px;
-            font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-        }
-
-        .additions {
-            color: var(--vscode-gitDecoration-addedResourceForeground);
-        }
-
-        .deletions {
-            color: var(--vscode-gitDecoration-deletedResourceForeground);
-        }
-
-        .diff-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-            font-size: 12px;
-            line-height: 1.4;
-        }
-
-        .diff-hunk-header {
-            background-color: var(--vscode-diffEditor-unchangedRegionBackground);
-            color: var(--vscode-diffEditor-unchangedRegionForeground);
-            padding: 4px 8px;
-            border-top: 1px solid var(--vscode-panel-border);
-            font-weight: 600;
-        }
-
-        .diff-line {
-            position: relative;
-        }
-
-        .diff-line:hover .add-comment-button {
-            opacity: 1;
-        }
-
-        .diff-line-num {
-            background-color: var(--vscode-editor-background);
-            color: var(--vscode-editorLineNumber-foreground);
-            padding: 0;
-            text-align: right;
-            vertical-align: top;
-            width: 50px;
-            min-width: 50px;
-            border-right: 1px solid var(--vscode-panel-border);
-            user-select: none;
-            position: relative;
-        }
-
-        .diff-line-wrapper {
-            position: relative;
-            padding: 2px 8px;
-            display: flex;
-            justify-content: flex-end;
-            align-items: center;
-            min-height: 22px;
-        }
-
-        .add-comment-button {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: transparent;
-            color: var(--vscode-button-foreground);
-            border: none;
-            cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.2s, background-color 0.2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1;
-        }
-        
-        /* Show a visual indicator on hover */
-        .add-comment-button::before {
-            content: '+';
-            background-color: var(--vscode-button-background);
-            border-radius: 3px;
-            width: 18px;
-            height: 18px;
-            font-size: 11px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: absolute;
-            left: 4px;
-        }
-
-        .add-comment-button:hover {
-            background-color: var(--vscode-list-hoverBackground);
-        }
-        
-        .add-comment-button:hover::before {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-
-        .diff-line-content {
-            padding: 2px 8px;
-            white-space: pre;
-            overflow: visible;
-            word-wrap: break-word;
-        }
-
-        .diff-line-addition {
-            background-color: var(--vscode-diffEditor-insertedLineBackground, #1e4f32);
-        }
-
-        .diff-line-addition .diff-line-content {
-            background-color: var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.25));
-        }
-
-        .diff-line-deletion {
-            background-color: var(--vscode-diffEditor-removedLineBackground, #4f1e1e);
-        }
-
-        .diff-line-deletion .diff-line-content {
-            background-color: var(--vscode-diffEditor-removedTextBackground, rgba(248, 81, 73, 0.25));
-        }
-
-        .diff-line-context {
-            background-color: var(--vscode-editor-background);
-        }
-
-        .no-changes {
-            padding: 20px;
-            text-align: center;
-            color: var(--vscode-descriptionForeground);
-            font-style: italic;
-        }
-
-        .comment-thread-row {
-            background-color: var(--vscode-editor-background);
-        }
-
-        .comment-thread-container {
-            border-left: 3px solid var(--vscode-button-background);
-            margin-left: 8px;
-            padding-left: 8px;
-        }
-
-        .comment-thread-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 0;
-            cursor: pointer;
-            color: var(--vscode-descriptionForeground);
-            font-size: 12px;
-            font-weight: 500;
-        }
-
-        .comment-thread-header:hover {
-            color: var(--vscode-foreground);
-        }
-
-        .comment-thread-toggle {
-            transition: transform 0.2s;
-            font-size: 10px;
-        }
-
-        .comment-thread-collapsed .comment-thread-toggle {
-            transform: rotate(-90deg);
-        }
-
-        .comment-thread-collapsed .comment-thread-body {
-            display: none;
-        }
-
-        .comment-thread-body {
-            padding-bottom: 8px;
-        }
-
-        .comment-item {
-            display: flex;
-            gap: 12px;
-            margin-bottom: 12px;
-            padding: 12px;
-            background-color: var(--vscode-editorWidget-background);
-            border: 1px solid var(--vscode-widget-border);
-            border-radius: 6px;
-        }
-
-        .comment-avatar {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 12px;
-            font-weight: 600;
-            flex-shrink: 0;
-        }
-
-        .comment-body {
-            flex: 1;
-            min-width: 0;
-        }
-
-        .comment-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 6px;
-        }
-
-        .comment-author {
-            font-weight: 600;
-            font-size: 13px;
-        }
-
-        .comment-timestamp {
-            font-size: 11px;
-            color: var(--vscode-descriptionForeground);
-        }
-
-        .comment-content {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            line-height: 1.4;
-            font-size: 13px;
-            margin-bottom: 8px;
-        }
-
-        .comment-actions-menu {
-            display: flex;
-            gap: 4px;
-        }
-
-        .comment-action-btn {
-            background: transparent;
-            border: none;
-            color: var(--vscode-descriptionForeground);
-            cursor: pointer;
-            font-size: 11px;
-            padding: 4px 6px;
-            border-radius: 3px;
-            transition: background-color 0.2s, color 0.2s;
-        }
-
-        .comment-action-btn:hover {
-            background-color: var(--vscode-toolbar-hoverBackground);
-            color: var(--vscode-foreground);
-        }
-
-        .comment-form-row {
-            background-color: var(--vscode-editor-background);
-        }
-
-        .comment-form-container {
-            border-left: 3px solid var(--vscode-button-background);
-            margin-left: 8px;
-            padding-left: 8px;
-        }
-
-        .comment-form {
-            display: flex;
-            gap: 12px;
-            padding: 12px;
-            background-color: var(--vscode-editorWidget-background);
-            border: 1px solid var(--vscode-widget-border);
-            border-radius: 6px;
-            margin: 8px 0;
-        }
-
-        .comment-form-avatar {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 12px;
-            font-weight: 600;
-            flex-shrink: 0;
-        }
-
-        .comment-form-body {
-            flex: 1;
-        }
-
-        .comment-textarea {
-            width: 100%;
-            min-height: 100px;
-            padding: 8px;
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 3px;
-            background-color: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
-            font-family: inherit;
-            font-size: 13px;
-            resize: vertical;
-            margin-bottom: 8px;
-        }
-
-        .comment-textarea:focus {
-            outline: 1px solid var(--vscode-focusBorder);
-            border-color: var(--vscode-focusBorder);
-        }
-
-        .comment-form-actions {
-            display: flex;
-            gap: 8px;
-            justify-content: flex-end;
-        }
-
-        .comment-submit-btn {
-            padding: 6px 12px;
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: 500;
-        }
-
-        .comment-submit-btn:hover:not(:disabled) {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-
-        .comment-submit-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .comment-cancel-btn {
-            padding: 6px 12px;
-            background-color: transparent;
-            color: var(--vscode-button-secondaryForeground);
-            border: 1px solid var(--vscode-button-border);
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-
-        .comment-cancel-btn:hover:not(:disabled) {
-            background-color: var(--vscode-button-secondaryHoverBackground);
-        }
-
-        .comment-cancel-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        /* Deletion animation */
-        .comment-item.deleting {
-            opacity: 0.5;
-            transform: scale(0.95);
-            transition: opacity 0.3s, transform 0.3s;
-            pointer-events: none;
-        }
-
-        .comment-item.deleted {
-            display: none;
-        }
-        ${this.getDiffLayoutStyles()}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Diff: ${this.escapeHtml(baseRef || "")} → ${this.escapeHtml(compareRef || "")}</h1>
-        <div class="header-actions">
-            <button class="copy-comments-btn" onclick="copyAllComments()">
-                <span>📋</span>
-                <span>Copy All Comments</span>
-            </button>
-            <button class="reload-btn" id="reload-diff-btn" onclick="reloadDiff()">
-                <span>↻</span>
-                <span>Reload</span>
-            </button>
-        </div>
-    </div>
-
-    <div class="content">
-        ${allFilesHtml}
-    </div>
-
-    <script>
-        const vscode = acquireVsCodeApi();
-
-        function reloadDiff() {
-            const reloadBtn = document.getElementById('reload-diff-btn');
-            if (reloadBtn.classList.contains('loading')) {
-                return; // Prevent multiple clicks while loading
-            }
-            
-            reloadBtn.classList.add('loading');
-            reloadBtn.innerHTML = '<span>↻</span><span>Reloading...</span>';
-            vscode.postMessage({ command: 'reload' });
-        }
-
-        function copyAllComments() {
-            vscode.postMessage({ command: 'copyComments' });
-        }
-
-        // Initialize event listeners
-        function initializeEventListeners() {
-            // Add event listener for file links in navigation
-            document.querySelectorAll('.file-link').forEach(link => {
-                link.addEventListener('click', (e) => {
-                    // Allow default scroll behavior but also open file
-                    const filePath = link.dataset.filePath;
-                    if (filePath) {
-                        vscode.postMessage({ command: 'openFile', filePath: filePath });
-                    }
-                });
-            });
-
-            // Add event listener for file headers
-            document.querySelectorAll('.file-header-title').forEach(header => {
-                header.addEventListener('click', (e) => {
-                    const filePath = header.dataset.filePath;
-                    if (filePath) {
-                        vscode.postMessage({ command: 'openFile', filePath: filePath });
-                    }
-                });
-            });
-        }
-
-        // Set up event listeners when DOM is ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initializeEventListeners);
-        } else {
-            initializeEventListeners();
-        }
-        
-        // Set current user info from extension
-        const currentUserName = ${JSON.stringify(currentUser || "User")};
-        let currentCommentThreadId = null;
-        
-        function getCurrentUserInitials() {
-            return currentUserName
-                .split(' ')
-                .map(name => name.charAt(0).toUpperCase())
-                .join('')
-                .substring(0, 2);
-        }
-        
-        function showCommentForm(button) {
-            // Line numbers repeat across files, so use the clicked button's row.
-            const targetRow = button.closest('tr.diff-line');
-            if (!targetRow) {
-                return;
-            }
-
-            const filePath = button.dataset.filePath;
-            const lineNumber = parseInt(button.dataset.lineNumber);
-            const lineType = button.dataset.lineType;
-
-            // Remove any existing form
-            hideCommentForm();
-            
-            const threadId = \`\${filePath}-\${lineNumber}-\${lineType}\`;
-            currentCommentThreadId = threadId;
-            
-            const formRow = document.createElement('tr');
-            formRow.classList.add('comment-form-row');
-            formRow.innerHTML = \`
-                <td colspan="3">
-                    <div class="comment-form-container">
-                        <div class="comment-form">
-                            <div class="comment-form-avatar">\${getCurrentUserInitials()}</div>
-                            <div class="comment-form-body">
-                                <textarea class="comment-textarea" placeholder="Leave a comment" data-thread-id="\${threadId}"></textarea>
-                                <div class="comment-form-actions">
-                                    <button class="comment-cancel-btn" data-cancel-comment>Cancel</button>
-                                    <button class="comment-submit-btn" data-submit-comment data-file-path="\${filePath}" data-line-number="\${lineNumber}" data-line-type="\${lineType}">Comment</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </td>
-            \`;
-            
-            targetRow.parentNode.insertBefore(formRow, targetRow.nextSibling);
-            
-            // Focus and setup textarea
-            const textarea = formRow.querySelector('.comment-textarea');
-            textarea.focus();
-            
-            // Auto-resize textarea
-            textarea.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.max(100, this.scrollHeight) + 'px';
-                
-                // Enable/disable submit button
-                const submitBtn = formRow.querySelector('.comment-submit-btn');
-                submitBtn.disabled = !this.value.trim();
-            });
-            
-            // Add event listeners for form buttons
-            formRow.querySelector('[data-cancel-comment]').addEventListener('click', hideCommentForm);
-            formRow.querySelector('[data-submit-comment]').addEventListener('click', function() {
-                const filePath = this.dataset.filePath;
-                const lineNumber = parseInt(this.dataset.lineNumber);
-                const lineType = this.dataset.lineType;
-                submitComment(filePath, lineNumber, lineType);
-            });
-        }
-        
-        function hideCommentForm() {
-            const existingForm = document.querySelector('.comment-form-row');
-            if (existingForm) {
-                existingForm.remove();
-            }
-            currentCommentThreadId = null;
-        }
-        
-        function submitComment(filePath, lineNumber, lineType) {
-            const textarea = document.querySelector('.comment-textarea');
-            const content = textarea.value.trim();
-            
-            if (!content) return;
-            
-            // Disable form while submitting
-            const submitBtn = document.querySelector('.comment-submit-btn');
-            const cancelBtn = document.querySelector('.comment-cancel-btn');
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Commenting...';
-            cancelBtn.disabled = true;
-            
-            vscode.postMessage({
-                command: 'addComment',
-                filePath: filePath,
-                lineNumber: lineNumber,
-                lineType: lineType,
-                content: content
-            });
-        }
-        
-        function toggleCommentThread(threadId) {
-            const container = document.querySelector(\`[data-thread-id="\${threadId}"]\`);
-            if (container) {
-                container.classList.toggle('comment-thread-collapsed');
-            }
-        }
-        
-        // Main event delegation for all clicks - this runs immediately
-        (function() {
-            document.addEventListener('click', function(event) {
-                const target = event.target;
-                
-                // Handle add comment button clicks
-                if (target.classList.contains('add-comment-button')) {
-                    event.preventDefault();
-                    showCommentForm(target);
-                }
-                
-                // Handle comment thread toggle
-                if (target.hasAttribute('data-toggle-thread')) {
-                    event.preventDefault();
-                    const threadId = target.dataset.toggleThread;
-                    toggleCommentThread(threadId);
-                }
-                
-                // Handle comment edit
-                if (target.hasAttribute('data-edit-comment')) {
-                    event.preventDefault();
-                    const commentId = target.dataset.editComment;
-                    editComment(commentId);
-                }
-                
-                // Handle comment copy
-                if (target.hasAttribute('data-copy-comment')) {
-                    event.preventDefault();
-                    const commentData = JSON.parse(target.dataset.copyComment.replace(/&apos;/g, "'"));
-                    copyComment(commentData);
-                }
-                
-                // Handle comment delete
-                if (target.hasAttribute('data-delete-comment')) {
-                    event.preventDefault();
-                    const commentId = target.dataset.deleteComment;
-                    deleteComment(commentId);
-                }
-            });
-        })();
-        
-        function editComment(commentId) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            if (!commentItem) return;
-            
-            const commentBody = commentItem.querySelector('.comment-body');
-            const contentDiv = commentBody.querySelector('.comment-content');
-            const actionsMenu = commentBody.querySelector('.comment-actions-menu');
-            const currentContent = contentDiv.textContent;
-            
-            // Hide actions menu and replace content with edit form
-            actionsMenu.style.display = 'none';
-            contentDiv.innerHTML = \`
-                <textarea class="comment-textarea" style="margin-bottom: 12px;">\${currentContent}</textarea>
-                <div class="comment-form-actions">
-                    <button class="comment-cancel-btn" data-cancel-edit="\${commentId}" data-original-content="\${currentContent.replace(/"/g, '&quot;')}">Cancel</button>
-                    <button class="comment-submit-btn" data-save-edit="\${commentId}">Save</button>
-                </div>
-            \`;
-            
-            // Focus and auto-resize textarea
-            const textarea = contentDiv.querySelector('.comment-textarea');
-            textarea.focus();
-            textarea.style.height = 'auto';
-            textarea.style.height = textarea.scrollHeight + 'px';
-            
-            textarea.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.max(100, this.scrollHeight) + 'px';
-                
-                const saveBtn = contentDiv.querySelector('.comment-submit-btn');
-                saveBtn.disabled = !this.value.trim();
-            });
-            
-            // Add event listeners for edit form buttons
-            contentDiv.querySelector('[data-cancel-edit]').addEventListener('click', function() {
-                const commentId = this.dataset.cancelEdit;
-                const originalContent = this.dataset.originalContent;
-                cancelEditComment(commentId, originalContent);
-            });
-            
-            contentDiv.querySelector('[data-save-edit]').addEventListener('click', function() {
-                const commentId = this.dataset.saveEdit;
-                saveEditComment(commentId);
-            });
-        }
-        
-        function saveEditComment(commentId) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            const textarea = commentItem.querySelector('.comment-textarea');
-            const newContent = textarea.value.trim();
-            
-            if (!newContent) return;
-            
-            // Disable form while saving
-            const saveBtn = commentItem.querySelector('.comment-submit-btn');
-            const cancelBtn = commentItem.querySelector('.comment-cancel-btn');
-            saveBtn.disabled = true;
-            saveBtn.textContent = 'Saving...';
-            cancelBtn.disabled = true;
-            
-            vscode.postMessage({
-                command: 'editComment',
-                commentId: commentId,
-                content: newContent
-            });
-        }
-        
-        function cancelEditComment(commentId, originalContent) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            const commentBody = commentItem.querySelector('.comment-body');
-            const contentDiv = commentBody.querySelector('.comment-content');
-            const actionsMenu = commentBody.querySelector('.comment-actions-menu');
-            
-            // Restore original content and show actions menu
-            contentDiv.innerHTML = originalContent;
-            actionsMenu.style.display = 'flex';
-        }
-        
-        function deleteComment(commentId) {
-            if (!commentId) {
-                console.error('No comment ID provided to deleteComment');
-                return;
-            }
-            
-            // Skip confirmation dialog (not allowed in webview sandbox)
-            // Add visual feedback immediately
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            if (commentItem) {
-                commentItem.classList.add('deleting');
-            }
-            
-            vscode.postMessage({
-                command: 'deleteComment',
-                commentId: commentId
-            });
-        }
-        
-        function copyComment(commentData) {
-            vscode.postMessage({
-                command: 'copySingleComment',
-                comment: commentData
-            });
-        }
-
-        // Listen for messages from extension
-        window.addEventListener('message', event => {
-            const message = event.data;
-            
-            // Handle reload completion message
-            if (message.command === 'reloadComplete') {
-                const reloadBtn = document.getElementById('reload-diff-btn');
-                if (reloadBtn) {
-                    reloadBtn.classList.remove('loading');
-                    
-                    if (message.success) {
-                        // Successfully reloaded - reset button
-                        reloadBtn.innerHTML = '<span>↻</span><span>Reload</span>';
-                    } else {
-                        // Error during reload - show error state
-                        reloadBtn.innerHTML = '<span>↻</span><span>Reload Failed</span>';
-                        
-                        // Reset to normal state after 3 seconds
-                        setTimeout(() => {
-                            reloadBtn.innerHTML = '<span>↻</span><span>Reload</span>';
-                        }, 3000);
-                    }
-                }
-            }
-            
-            // Handle comment deletion confirmation
-            if (message.command === 'commentDeleted') {
-                const commentItem = document.querySelector(\`[data-comment-id="\${message.commentId}"]\`);
-                if (commentItem) {
-                    commentItem.classList.add('deleted');
-                    // Check if this was the last comment in the thread
-                    const threadContainer = commentItem.closest('.comment-thread-container');
-                    if (threadContainer) {
-                        const remainingComments = threadContainer.querySelectorAll('.comment-item:not(.deleted)');
-                        if (remainingComments.length === 0) {
-                            // Hide the entire thread row
-                            const threadRow = threadContainer.closest('.comment-thread-row');
-                            if (threadRow) {
-                                threadRow.style.display = 'none';
-                            }
-                        } else {
-                            // Update comment count in thread header
-                            const threadHeader = threadContainer.querySelector('.comment-thread-header');
-                            if (threadHeader) {
-                                const count = remainingComments.length;
-                                threadHeader.innerHTML = \`<span class="comment-thread-toggle">▼</span>\${count} comment\${count > 1 ? 's' : ''}\`;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // Auto-reload when webview gains focus
-        let lastFocusTime = Date.now();
-        let reloadDebounceTimer = null;
-        
-        function handleAutoReload() {
-            const now = Date.now();
-            // Only auto-reload if it's been more than 5 seconds since last focus
-            if (now - lastFocusTime > 5000) {
-                const reloadBtn = document.getElementById('reload-diff-btn');
-                if (reloadBtn && !reloadBtn.classList.contains('loading')) {
-                    // Debounce rapid focus events
-                    if (reloadDebounceTimer) {
-                        clearTimeout(reloadDebounceTimer);
-                    }
-                    
-                    reloadDebounceTimer = setTimeout(() => {
-                        reloadBtn.classList.add('loading');
-                        reloadBtn.innerHTML = '<span>↻</span><span>Auto-reloading...</span>';
-                        vscode.postMessage({ command: 'reload' });
-                        lastFocusTime = now;
-                    }, 500); // 500ms debounce
-                }
-            }
-        }
-        
-        // Listen for window focus events
-        window.addEventListener('focus', handleAutoReload);
-        
-        // Also listen for visibility change (when tab becomes active)
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
-                handleAutoReload();
-            }
-        });
-    </script>
-</body>
-</html>`;
-  }
-
-  getWorkingDirectoryContent(
-    fileDiffs: FileDiff[],
-    comments: Map<string, DiffComment[]> = new Map(),
-    currentUser?: string,
-  ): string {
-    return this.generateDiffHTML(
-      fileDiffs,
-      "HEAD → Working Directory",
-      "HEAD",
-      "working",
-      comments,
-      currentUser,
-    );
-  }
-
-  private generateDiffHTML(
-    fileDiffs: FileDiff[],
-    title: string,
-    baseRef?: string,
-    compareRef?: string,
-    comments: Map<string, DiffComment[]> = new Map(),
-    currentUser?: string,
-  ): string {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Diff View: ${title}</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: var(--vscode-editor-background);
-            color: var(--vscode-editor-foreground);
-        }
-        
-        .header {
-            position: sticky;
-            top: 0;
-            background: var(--vscode-editor-background);
-            border-bottom: 1px solid var(--vscode-editorWidget-border);
-            padding: 16px 20px;
-            z-index: 100;
-        }
-        
-        .header h1 {
-            margin: 0 0 8px 0;
-            font-size: 20px;
-            font-weight: 600;
-        }
-        
-        .header-stats {
-            display: flex;
-            gap: 20px;
-            font-size: 14px;
-            align-items: center;
-        }
-        
-        .reload-button {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 6px 12px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            transition: background-color 0.2s;
-        }
-        
-        .reload-button:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-        
-        .reload-button:active {
-            background: var(--vscode-button-background);
-            transform: translateY(1px);
-        }
-        
-        .reload-button.loading {
-            opacity: 0.7;
-            cursor: not-allowed;
-        }
-
-        .copy-comments-button {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 6px 12px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            transition: background-color 0.2s;
-        }
-        
-        .copy-comments-button:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-        
-        .copy-comments-button:active {
-            background: var(--vscode-button-background);
-            transform: translateY(1px);
-        }
-        
-        .copy-comments-button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        .stat-item {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .additions {
-            color: #3fb950;
-        }
-        
-        .deletions {
-            color: #f85149;
-        }
-        
-        .file-nav {
-            position: sticky;
-            top: 73px;
-            background: var(--vscode-editorWidget-background);
-            border-bottom: 1px solid var(--vscode-editorWidget-border);
-            padding: 12px 20px;
-            max-height: 200px;
-            overflow-y: auto;
-            z-index: 99;
-        }
-        
-        .file-nav-title {
-            font-size: 12px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            text-transform: uppercase;
-            color: var(--vscode-descriptionForeground);
-        }
-        
-        .file-link {
-            display: block;
-            padding: 4px 8px;
-            margin: 2px 0;
-            text-decoration: none;
-            color: var(--vscode-textLink-foreground);
-            border-radius: 4px;
-            font-size: 13px;
-            transition: background-color 0.2s;
-        }
-        
-        .file-link:hover {
-            background: var(--vscode-list-hoverBackground);
-        }
-        
-        .file-link .file-stats {
-            float: right;
-            font-size: 11px;
-        }
-        
-        .content {
-            padding: 20px;
-        }
-        
-        .file-diff {
-            margin-bottom: 32px;
-            border: 1px solid var(--vscode-editorWidget-border);
-            border-radius: 6px;
-            overflow: hidden;
-        }
-        
-        .file-header {
-            padding: 12px 16px;
-            background: var(--vscode-editorWidget-background);
-            border-bottom: 1px solid var(--vscode-editorWidget-border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .file-header h2 {
-            margin: 0;
-            font-size: 14px;
-            font-weight: 600;
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-        }
-
-        .file-header-title {
-            cursor: pointer;
-            transition: color 0.2s;
-        }
-
-        .file-header-title:hover {
-            color: var(--vscode-textLink-foreground);
-            text-decoration: underline;
-        }
-
-        .file-stats {
-            display: flex;
-            gap: 12px;
-            font-size: 12px;
-        }
-        
-        .diff-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-            font-size: 12px;
-            line-height: 20px;
-        }
-        
-        .diff-line {
-            position: relative;
-        }
-        
-        .diff-line-num {
-            width: 1%;
-            min-width: 50px;
-            padding: 0 10px;
-            text-align: right;
-            color: var(--vscode-editorLineNumber-foreground);
-            background: var(--vscode-editorGutter-background);
-            user-select: none;
-            border-right: 1px solid var(--vscode-editorWidget-border);
-        }
-        
-        .diff-line-content {
-            padding: 0 10px;
-            white-space: pre;
-            word-wrap: break-word;
-        }
-        
-        .diff-line-addition {
-            background: rgba(63, 185, 80, 0.15);
-        }
-        
-        .diff-line-addition .diff-line-content::before {
-            content: "+";
-            position: absolute;
-            left: 0;
-            color: #3fb950;
-        }
-        
-        .diff-line-deletion {
-            background: rgba(248, 81, 73, 0.15);
-        }
-        
-        .diff-line-deletion .diff-line-content::before {
-            content: "-";
-            position: absolute;
-            left: 0;
-            color: #f85149;
-        }
-        
-        .diff-line-context {
-            color: var(--vscode-editor-foreground);
-        }
-        
-        .diff-hunk-header {
-            background: var(--vscode-diffEditor-unchangedRegionBackground);
-            color: var(--vscode-descriptionForeground);
-            font-weight: bold;
-            padding: 4px 10px;
-        }
-        
-        .empty-diff {
-            padding: 40px;
-            text-align: center;
-            color: var(--vscode-descriptionForeground);
-        }
-        
-        .no-changes {
-            padding: 20px;
-            text-align: center;
-            color: var(--vscode-descriptionForeground);
-            background: var(--vscode-editorWidget-background);
-        }
-
-        /* GitHub-style Comment System */
-        .diff-line-wrapper {
-            position: relative;
-        }
-
-        /* Expand the clickable area for line numbers */
-        .diff-line-wrapper {
-            position: relative;
-            min-height: 22px;
-        }
-
-        .add-comment-button {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: transparent;
-            color: var(--vscode-button-foreground);
-            border: none;
-            cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.2s, background-color 0.2s;
-            display: flex;
-            align-items: center;
-            padding-left: 4px;
-            z-index: 10;
-        }
-        
-        /* Show a visual indicator on hover */
-        .add-comment-button::before {
-            content: '+';
-            background: var(--vscode-button-background);
-            border-radius: 50%;
-            width: 18px;
-            height: 18px;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .diff-line:hover .add-comment-button {
-            opacity: 1;
-        }
-
-        .add-comment-button:hover {
-            background-color: var(--vscode-list-hoverBackground);
-        }
-        
-        .add-comment-button:hover::before {
-            background: var(--vscode-button-hoverBackground);
-            transform: scale(1.1);
-        }
-
-        .comment-thread-container {
-            border: 1px solid var(--vscode-editorWidget-border);
-            border-radius: 8px;
-            margin: 16px 32px;
-            background: var(--vscode-editor-background);
-            position: relative;
-        }
-
-        .comment-thread-container::before {
-            content: '';
-            position: absolute;
-            left: -8px;
-            top: 8px;
-            width: 0;
-            height: 0;
-            border-right: 8px solid var(--vscode-editorWidget-border);
-            border-top: 8px solid transparent;
-            border-bottom: 8px solid transparent;
-        }
-
-        .comment-thread-container::after {
-            content: '';
-            position: absolute;
-            left: -7px;
-            top: 8px;
-            width: 0;
-            height: 0;
-            border-right: 8px solid var(--vscode-editor-background);
-            border-top: 8px solid transparent;
-            border-bottom: 8px solid transparent;
-        }
-
-        .comment-thread-header {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--vscode-editorWidget-border);
-            background: var(--vscode-editorWidget-background);
-            border-radius: 8px 8px 0 0;
-            font-size: 12px;
-            color: var(--vscode-descriptionForeground);
-            cursor: pointer;
-            user-select: none;
-        }
-
-        .comment-thread-header:hover {
-            background: var(--vscode-list-hoverBackground);
-        }
-
-        .comment-thread-toggle {
-            display: inline-block;
-            margin-right: 8px;
-            transition: transform 0.2s;
-        }
-
-        .comment-thread-collapsed .comment-thread-toggle {
-            transform: rotate(-90deg);
-        }
-
-        .comment-thread-body {
-            display: block;
-        }
-
-        .comment-thread-collapsed .comment-thread-body {
-            display: none;
-        }
-
-        .comment-item {
-            padding: 16px;
-            border-bottom: 1px solid var(--vscode-editorWidget-border);
-            display: flex;
-            gap: 12px;
-        }
-
-        .comment-item:last-child {
-            border-bottom: none;
-            border-radius: 0 0 8px 8px;
-        }
-
-        .comment-avatar {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            background: var(--vscode-button-background);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--vscode-button-foreground);
-            flex-shrink: 0;
-        }
-
-        .comment-body {
-            flex: 1;
-            min-width: 0;
-        }
-
-        .comment-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 8px;
-            font-size: 12px;
-        }
-
-        .comment-author {
-            font-weight: 600;
-            color: var(--vscode-textLink-foreground);
-        }
-
-        .comment-timestamp {
-            color: var(--vscode-descriptionForeground);
-        }
-
-        .comment-content {
-            font-size: 13px;
-            line-height: 1.5;
-            color: var(--vscode-editor-foreground);
-            word-wrap: break-word;
-            white-space: pre-wrap;
-        }
-
-        .comment-actions-menu {
-            display: flex;
-            gap: 12px;
-            margin-top: 8px;
-        }
-
-        .comment-action-btn {
-            background: var(--vscode-button-secondaryBackground);
-            border: 1px solid var(--vscode-button-border);
-            color: var(--vscode-button-secondaryForeground);
-            cursor: pointer;
-            font-size: 11px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            transition: all 0.2s;
-            min-width: 50px;
-        }
-
-        .comment-action-btn:hover {
-            background: var(--vscode-button-hoverBackground);
-            color: var(--vscode-button-foreground);
-            transform: translateY(-1px);
-        }
-
-        .comment-action-btn:active {
-            transform: translateY(0);
-        }
-
-        .comment-form-container {
-            border: 1px solid var(--vscode-editorWidget-border);
-            border-radius: 8px;
-            margin: 16px 32px;
-            background: var(--vscode-editor-background);
-            position: relative;
-        }
-
-        .comment-form-container::before {
-            content: '';
-            position: absolute;
-            left: -8px;
-            top: 16px;
-            width: 0;
-            height: 0;
-            border-right: 8px solid var(--vscode-editorWidget-border);
-            border-top: 8px solid transparent;
-            border-bottom: 8px solid transparent;
-        }
-
-        .comment-form-container::after {
-            content: '';
-            position: absolute;
-            left: -7px;
-            top: 16px;
-            width: 0;
-            height: 0;
-            border-right: 8px solid var(--vscode-editor-background);
-            border-top: 8px solid transparent;
-            border-bottom: 8px solid transparent;
-        }
-
-        .comment-form {
-            padding: 16px;
-            display: flex;
-            gap: 12px;
-        }
-
-        .comment-form-avatar {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            background: var(--vscode-button-background);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--vscode-button-foreground);
-            flex-shrink: 0;
-        }
-
-        .comment-form-body {
-            flex: 1;
-        }
-
-        .comment-textarea {
-            width: 100%;
-            min-height: 100px;
-            padding: 12px;
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 6px;
-            background: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
-            font-family: inherit;
-            font-size: 13px;
-            line-height: 1.4;
-            resize: vertical;
-            box-sizing: border-box;
-        }
-
-        .comment-textarea:focus {
-            outline: none;
-            border-color: var(--vscode-focusBorder);
-        }
-
-        .comment-form-actions {
-            display: flex;
-            gap: 8px;
-            margin-top: 12px;
-            justify-content: flex-end;
-        }
-
-        .comment-submit-btn {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: 500;
-        }
-
-        .comment-submit-btn:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
-
-        .comment-submit-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .comment-cancel-btn {
-            background: none;
-            color: var(--vscode-descriptionForeground);
-            border: 1px solid var(--vscode-input-border);
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-
-        .comment-cancel-btn:hover {
-            background: var(--vscode-list-hoverBackground);
-            border-color: var(--vscode-textLink-foreground);
-            color: var(--vscode-textLink-foreground);
-        }
-
-        /* Deletion animation */
-        .comment-item.deleting {
-            opacity: 0.5;
-            transform: scale(0.95);
-            transition: opacity 0.3s, transform 0.3s;
-            pointer-events: none;
-        }
-
-        .comment-item.deleted {
-            display: none;
-        }
-        ${this.getDiffLayoutStyles()}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>${this.escapeHtml(title)}</h1>
-        <div class="header-stats">
-            <div class="stat-item">
-                <span>${fileDiffs.length} files changed</span>
-            </div>
-            <div class="stat-item additions">
-                <span>+${fileDiffs.reduce((sum, f) => sum + f.additions, 0)} additions</span>
-            </div>
-            <div class="stat-item deletions">
-                <span>-${fileDiffs.reduce((sum, f) => sum + f.deletions, 0)} deletions</span>
-            </div>
-            <button class="reload-button" id="reload-diff-btn">
-                <span>↻</span>
-                <span>Reload</span>
-            </button>
-            <button class="copy-comments-button" id="copy-comments-btn">
-                <span>📋</span>
-                <span>Copy Comments</span>
-            </button>
-        </div>
-    </div>
-    
-    ${
-      fileDiffs.length > 3
-        ? `
-    <div class="file-nav">
-        <div class="file-nav-title">Files Changed</div>
-        ${fileDiffs
-          .map(
-            (file) => `
-            <a href="#file-${this.escapeHtml(file.path.replace(/[^a-zA-Z0-9]/g, "-"))}"
-               class="file-link"
-               data-file-path="${this.escapeHtml(file.path)}"
-               title="Click to open in editor">
-                ${this.escapeHtml(file.path)}
-                <span class="file-stats">
-                    <span class="additions">+${file.additions}</span>
-                    <span class="deletions">-${file.deletions}</span>
-                </span>
-            </a>
-        `,
-          )
-          .join("")}
-    </div>
-    `
-        : ""
-    }
-    
-    <div class="content">
-        ${
-          fileDiffs.length === 0
-            ? '<div class="empty-diff">No changes found between these branches</div>'
-            : fileDiffs
-                .map((file) =>
-                  this.renderFileDiff(
-                    file,
-                    comments.get(file.path) || [],
-                    baseRef,
-                    compareRef,
-                  ),
-                )
-                .join("")
-        }
-    </div>
-    
-    <script>
-        // VS Code API
-        const vscode = acquireVsCodeApi();
-        
-        // Initialize all event listeners - called immediately and after reloads
-        function initializeEventListeners() {
-            // Smooth scroll for navigation links
-            document.querySelectorAll('.file-link').forEach(link => {
-                link.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    const target = document.querySelector(link.getAttribute('href'));
-                    if (target) {
-                        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    }
-                    // Also open the file in editor
-                    const filePath = link.dataset.filePath;
-                    if (filePath) {
-                        vscode.postMessage({ command: 'openFile', filePath: filePath });
-                    }
-                });
-            });
-
-            // Add event listener for file headers
-            document.querySelectorAll('.file-header-title').forEach(header => {
-                header.addEventListener('click', (e) => {
-                    const filePath = header.dataset.filePath;
-                    if (filePath) {
-                        vscode.postMessage({ command: 'openFile', filePath: filePath });
-                    }
-                });
-            });
-            
-            // Reload button functionality
-            const reloadBtn = document.getElementById('reload-diff-btn');
-            if (reloadBtn) {
-                reloadBtn.addEventListener('click', function() {
-                    this.classList.add('loading');
-                    this.innerHTML = '<span>↻</span><span>Loading...</span>';
-                    vscode.postMessage({ command: 'reload' });
-                });
-            }
-            
-            // Copy comments button functionality
-            const copyCommentsBtn = document.getElementById('copy-comments-btn');
-            if (copyCommentsBtn) {
-                copyCommentsBtn.addEventListener('click', function() {
-                    this.disabled = true;
-                    this.innerHTML = '<span>📋</span><span>Copying...</span>';
-                    vscode.postMessage({ command: 'copyComments' });
-                    
-                    // Reset button state after a delay
-                    setTimeout(() => {
-                        this.disabled = false;
-                        this.innerHTML = '<span>📋</span><span>Copy Comments</span>';
-                    }, 1000);
-                });
-            }
-        }
-        
-        // Initialize when DOM is ready
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initializeEventListeners);
-        } else {
-            initializeEventListeners();
-        }
-        
-        // Set current user info from extension
-        const currentUserName = ${JSON.stringify(currentUser || "User")};
-        let currentCommentThreadId = null;
-        
-        function getCurrentUserInitials() {
-            return currentUserName
-                .split(' ')
-                .map(name => name.charAt(0).toUpperCase())
-                .join('')
-                .substring(0, 2);
-        }
-        
-        function showCommentForm(button) {
-            // Line numbers repeat across files, so use the clicked button's row.
-            const targetRow = button.closest('tr.diff-line');
-            if (!targetRow) {
-                return;
-            }
-
-            const filePath = button.dataset.filePath;
-            const lineNumber = parseInt(button.dataset.lineNumber);
-            const lineType = button.dataset.lineType;
-
-            // Remove any existing form
-            hideCommentForm();
-            
-            const threadId = \`\${filePath}-\${lineNumber}-\${lineType}\`;
-            currentCommentThreadId = threadId;
-            
-            const formRow = document.createElement('tr');
-            formRow.classList.add('comment-form-row');
-            formRow.innerHTML = \`
-                <td colspan="3">
-                    <div class="comment-form-container">
-                        <div class="comment-form">
-                            <div class="comment-form-avatar">\${getCurrentUserInitials()}</div>
-                            <div class="comment-form-body">
-                                <textarea class="comment-textarea" placeholder="Leave a comment" data-thread-id="\${threadId}"></textarea>
-                                <div class="comment-form-actions">
-                                    <button class="comment-cancel-btn" data-cancel-comment>Cancel</button>
-                                    <button class="comment-submit-btn" data-submit-comment data-file-path="\${filePath}" data-line-number="\${lineNumber}" data-line-type="\${lineType}">Comment</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </td>
-            \`;
-            
-            targetRow.parentNode.insertBefore(formRow, targetRow.nextSibling);
-            
-            // Focus and setup textarea
-            const textarea = formRow.querySelector('.comment-textarea');
-            textarea.focus();
-            
-            // Auto-resize textarea
-            textarea.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.max(100, this.scrollHeight) + 'px';
-                
-                // Enable/disable submit button
-                const submitBtn = formRow.querySelector('.comment-submit-btn');
-                submitBtn.disabled = !this.value.trim();
-            });
-            
-            // Add event listeners for form buttons
-            formRow.querySelector('[data-cancel-comment]').addEventListener('click', hideCommentForm);
-            formRow.querySelector('[data-submit-comment]').addEventListener('click', function() {
-                const filePath = this.dataset.filePath;
-                const lineNumber = parseInt(this.dataset.lineNumber);
-                const lineType = this.dataset.lineType;
-                submitComment(filePath, lineNumber, lineType);
-            });
-        }
-        
-        function hideCommentForm() {
-            const existingForm = document.querySelector('.comment-form-row');
-            if (existingForm) {
-                existingForm.remove();
-            }
-            currentCommentThreadId = null;
-        }
-        
-        function submitComment(filePath, lineNumber, lineType) {
-            const textarea = document.querySelector('.comment-textarea');
-            const content = textarea.value.trim();
-            
-            if (!content) return;
-            
-            // Disable form while submitting
-            const submitBtn = document.querySelector('.comment-submit-btn');
-            const cancelBtn = document.querySelector('.comment-cancel-btn');
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Commenting...';
-            cancelBtn.disabled = true;
-            
-            vscode.postMessage({
-                command: 'addComment',
-                filePath: filePath,
-                lineNumber: lineNumber,
-                lineType: lineType,
-                content: content
-            });
-        }
-        
-        function toggleCommentThread(threadId) {
-            const container = document.querySelector(\`[data-thread-id="\${threadId}"]\`);
-            if (container) {
-                container.classList.toggle('comment-thread-collapsed');
-            }
-        }
-        
-        // Main event delegation for all clicks - this runs immediately
-        (function() {
-            document.addEventListener('click', function(event) {
-                const target = event.target;
-                
-                // Handle add comment button clicks
-                if (target.classList.contains('add-comment-button')) {
-                    event.preventDefault();
-                    showCommentForm(target);
-                }
-                
-                // Handle comment thread toggle
-                if (target.hasAttribute('data-toggle-thread')) {
-                    event.preventDefault();
-                    const threadId = target.dataset.toggleThread;
-                    toggleCommentThread(threadId);
-                }
-                
-                // Handle comment edit
-                if (target.hasAttribute('data-edit-comment')) {
-                    event.preventDefault();
-                    const commentId = target.dataset.editComment;
-                    editComment(commentId);
-                }
-                
-                // Handle comment copy
-                if (target.hasAttribute('data-copy-comment')) {
-                    event.preventDefault();
-                    const commentData = JSON.parse(target.dataset.copyComment.replace(/&apos;/g, "'"));
-                    copyComment(commentData);
-                }
-                
-                // Handle comment delete
-                if (target.hasAttribute('data-delete-comment')) {
-                    event.preventDefault();
-                    const commentId = target.dataset.deleteComment;
-                    deleteComment(commentId);
-                }
-            });
-        })();
-        
-        function editComment(commentId) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            if (!commentItem) return;
-            
-            const commentBody = commentItem.querySelector('.comment-body');
-            const contentDiv = commentBody.querySelector('.comment-content');
-            const actionsMenu = commentBody.querySelector('.comment-actions-menu');
-            const currentContent = contentDiv.textContent;
-            
-            // Hide actions menu and replace content with edit form
-            actionsMenu.style.display = 'none';
-            contentDiv.innerHTML = \`
-                <textarea class="comment-textarea" style="margin-bottom: 12px;">\${currentContent}</textarea>
-                <div class="comment-form-actions">
-                    <button class="comment-cancel-btn" data-cancel-edit="\${commentId}" data-original-content="\${currentContent.replace(/"/g, '&quot;')}">Cancel</button>
-                    <button class="comment-submit-btn" data-save-edit="\${commentId}">Save</button>
-                </div>
-            \`;
-            
-            // Focus and auto-resize textarea
-            const textarea = contentDiv.querySelector('.comment-textarea');
-            textarea.focus();
-            textarea.style.height = 'auto';
-            textarea.style.height = textarea.scrollHeight + 'px';
-            
-            textarea.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.max(100, this.scrollHeight) + 'px';
-                
-                const saveBtn = contentDiv.querySelector('.comment-submit-btn');
-                saveBtn.disabled = !this.value.trim();
-            });
-            
-            // Add event listeners for edit form buttons
-            contentDiv.querySelector('[data-cancel-edit]').addEventListener('click', function() {
-                const commentId = this.dataset.cancelEdit;
-                const originalContent = this.dataset.originalContent;
-                cancelEditComment(commentId, originalContent);
-            });
-            
-            contentDiv.querySelector('[data-save-edit]').addEventListener('click', function() {
-                const commentId = this.dataset.saveEdit;
-                saveEditComment(commentId);
-            });
-        }
-        
-        function saveEditComment(commentId) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            const textarea = commentItem.querySelector('.comment-textarea');
-            const newContent = textarea.value.trim();
-            
-            if (!newContent) return;
-            
-            // Disable form while saving
-            const saveBtn = commentItem.querySelector('.comment-submit-btn');
-            const cancelBtn = commentItem.querySelector('.comment-cancel-btn');
-            saveBtn.disabled = true;
-            saveBtn.textContent = 'Saving...';
-            cancelBtn.disabled = true;
-            
-            vscode.postMessage({
-                command: 'editComment',
-                commentId: commentId,
-                content: newContent
-            });
-        }
-        
-        function cancelEditComment(commentId, originalContent) {
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            const commentBody = commentItem.querySelector('.comment-body');
-            const contentDiv = commentBody.querySelector('.comment-content');
-            const actionsMenu = commentBody.querySelector('.comment-actions-menu');
-            
-            // Restore original content and show actions menu
-            contentDiv.innerHTML = originalContent;
-            actionsMenu.style.display = 'flex';
-        }
-        
-        function deleteComment(commentId) {
-            // Skip confirmation dialog (not allowed in webview sandbox)
-            // Add visual feedback immediately
-            const commentItem = document.querySelector(\`[data-comment-id="\${commentId}"]\`);
-            if (commentItem) {
-                commentItem.classList.add('deleting');
-            }
-            
-            vscode.postMessage({
-                command: 'deleteComment',
-                commentId: commentId
-            });
-        }
-        
-        function copyComment(commentData) {
-            vscode.postMessage({
-                command: 'copySingleComment',
-                comment: commentData
-            });
-        }
-
-        // Listen for messages from extension
-        window.addEventListener('message', event => {
-            const message = event.data;
-            
-            // Handle reload completion message
-            if (message.command === 'reloadComplete') {
-                const reloadBtn = document.getElementById('reload-diff-btn');
-                if (reloadBtn) {
-                    reloadBtn.classList.remove('loading');
-                    
-                    if (message.success) {
-                        // Successfully reloaded - reset button
-                        reloadBtn.innerHTML = '<span>↻</span><span>Reload</span>';
-                    } else {
-                        // Error during reload - show error state
-                        reloadBtn.innerHTML = '<span>↻</span><span>Reload Failed</span>';
-                        
-                        // Reset to normal state after 3 seconds
-                        setTimeout(() => {
-                            reloadBtn.innerHTML = '<span>↻</span><span>Reload</span>';
-                        }, 3000);
-                    }
-                }
-            }
-            
-            // Handle comment deletion confirmation
-            if (message.command === 'commentDeleted') {
-                const commentItem = document.querySelector(\`[data-comment-id="\${message.commentId}"]\`);
-                if (commentItem) {
-                    commentItem.classList.add('deleted');
-                    // Check if this was the last comment in the thread
-                    const threadContainer = commentItem.closest('.comment-thread-container');
-                    if (threadContainer) {
-                        const remainingComments = threadContainer.querySelectorAll('.comment-item:not(.deleted)');
-                        if (remainingComments.length === 0) {
-                            // Hide the entire thread row
-                            const threadRow = threadContainer.closest('.comment-thread-row');
-                            if (threadRow) {
-                                threadRow.style.display = 'none';
-                            }
-                        } else {
-                            // Update comment count in thread header
-                            const threadHeader = threadContainer.querySelector('.comment-thread-header');
-                            if (threadHeader) {
-                                const count = remainingComments.length;
-                                threadHeader.innerHTML = \`<span class="comment-thread-toggle">▼</span>\${count} comment\${count > 1 ? 's' : ''}\`;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // Auto-reload when webview gains focus
-        let lastFocusTime = Date.now();
-        let reloadDebounceTimer = null;
-        
-        function handleAutoReload() {
-            const now = Date.now();
-            // Only auto-reload if it's been more than 5 seconds since last focus
-            if (now - lastFocusTime > 5000) {
-                const reloadBtn = document.getElementById('reload-diff-btn');
-                if (reloadBtn && !reloadBtn.classList.contains('loading')) {
-                    // Debounce rapid focus events
-                    if (reloadDebounceTimer) {
-                        clearTimeout(reloadDebounceTimer);
-                    }
-                    
-                    reloadDebounceTimer = setTimeout(() => {
-                        reloadBtn.classList.add('loading');
-                        reloadBtn.innerHTML = '<span>↻</span><span>Auto-reloading...</span>';
-                        vscode.postMessage({ command: 'reload' });
-                        lastFocusTime = now;
-                    }, 500); // 500ms debounce
-                }
-            }
-        }
-        
-        // Listen for window focus events
-        window.addEventListener('focus', handleAutoReload);
-        
-        // Also listen for visibility change (when tab becomes active)
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
-                handleAutoReload();
-            }
-        });
-    </script>
-</body>
-</html>`;
-  }
-
-  private renderFileDiff(
-    file: FileDiff,
-    comments: DiffComment[] = [],
-    baseRef?: string,
-    compareRef?: string,
-  ): string {
-    const lines = file.content.split("\n");
-    const hunks = this.parseDiff(lines);
-    const fileId = file.path.replace(/[^a-zA-Z0-9]/g, "-");
-
-    return `
-        <div class="file-diff" id="file-${this.escapeHtml(fileId)}">
-            <div class="file-header">
-                <h2 class="file-header-title" data-file-path="${this.escapeHtml(file.path)}" title="Click to open in editor">${this.escapeHtml(file.path)}</h2>
-                <div class="file-stats">
-                    <span class="additions">+${file.additions}</span>
-                    <span class="deletions">-${file.deletions}</span>
-                </div>
-            </div>
-            ${
-              hunks.length > 0
-                ? `<table class="diff-table">${this.getDiffColumns()}<tbody>${this.renderHunks(hunks, file.path, comments, baseRef, compareRef)}</tbody></table>`
-                : `<div class="no-changes">${this.getEmptyDiffMessage(file.content)}</div>`
-            }
-        </div>`;
-  }
-
-  private renderHunks(
-    hunks: any[],
-    filePath: string,
-    comments: DiffComment[] = [],
-    baseRef?: string,
-    compareRef?: string,
-  ): string {
-    let html = "";
-
-    for (const hunk of hunks) {
-      html += `<tr><td colspan="3" class="diff-hunk-header">${this.escapeHtml(hunk.header)}</td></tr>`;
-
-      for (const line of hunk.lines) {
-        const lineClass = `diff-line-${line.type}`;
-        const lineNumber = line.newLineNum || line.oldLineNum;
-
-        // GitHub-style + button positioning
-        const addCommentButton = lineNumber
-          ? `<button class="add-comment-button" data-file-path="${this.escapeHtml(filePath)}" data-line-number="${lineNumber}" data-line-type="${line.type}" title="Add a comment to this line">+</button>`
-          : "";
-
-        html += `
-                    <tr class="diff-line ${lineClass}" data-line-num="${lineNumber}" data-line-type="${line.type}">
-                        <td class="diff-line-num">
-                            <div class="diff-line-wrapper">
-                                ${addCommentButton}
-                                ${line.oldLineNum}
-                            </div>
-                        </td>
-                        <td class="diff-line-num">${line.newLineNum}</td>
-                        <td class="diff-line-content">${this.escapeHtml(line.content)}</td>
-                    </tr>
-                `;
-
-        // Add existing comment thread for this line
-        const lineComments = comments.filter(
-          (comment) =>
-            comment.lineNumber === lineNumber && comment.lineType === line.type,
-        );
-
-        if (lineComments.length > 0) {
-          const threadId = `${filePath}-${lineNumber}-${line.type}`;
-          const commentCount = lineComments.length;
-          const isCollapsed = false; // Always expanded by default
-
-          html += `
-                        <tr class="comment-thread-row">
-                            <td colspan="3">
-                                <div class="comment-thread-container ${isCollapsed ? "comment-thread-collapsed" : ""}" data-thread-id="${threadId}">
-                                    <div class="comment-thread-header" data-toggle-thread="${threadId}">
-                                        <span class="comment-thread-toggle">▼</span>
-                                        ${commentCount} comment${commentCount > 1 ? "s" : ""}
-                                    </div>
-                                    <div class="comment-thread-body">
-                                        ${lineComments.map((comment) => this.renderComment(comment)).join("")}
-                                    </div>
-                                </div>
-                            </td>
-                        </tr>
-                    `;
-        }
-      }
-    }
-
-    return html;
-  }
-
-  private renderComment(comment: DiffComment): string {
-    const timestamp = new Date(comment.timestamp).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-    const authorInitials = this.getAuthorInitials(comment.author);
-
-    return `
-            <div class="comment-item" data-comment-id="${comment.id}">
-                <div class="comment-avatar">${authorInitials}</div>
-                <div class="comment-body">
-                    <div class="comment-header">
-                        <span class="comment-author">${this.escapeHtml(comment.author)}</span>
-                        <span class="comment-timestamp">${timestamp}</span>
-                    </div>
-                    <div class="comment-content">${this.escapeHtml(comment.content)}</div>
-                    <div class="comment-actions-menu">
-                        <button class="comment-action-btn" data-copy-comment='${JSON.stringify(
-                          {
-                            id: comment.id,
-                            filePath: comment.filePath,
-                            lineNumber: comment.lineNumber,
-                            lineType: comment.lineType,
-                            content: comment.content,
-                            author: comment.author,
-                            timestamp: comment.timestamp,
-                            baseRef: comment.baseRef,
-                            compareRef: comment.compareRef,
-                          },
-                        ).replace(/'/g, "&apos;")}'>📋 Copy</button>
-                        <button class="comment-action-btn" data-edit-comment="${comment.id}">✏️ Edit</button>
-                        <button class="comment-action-btn" data-delete-comment="${comment.id}">🗑️ Delete</button>
-                    </div>
-                </div>
-            </div>
-        `;
-  }
-
-  private getAuthorInitials(author: string): string {
-    return author
-      .split(" ")
-      .map((name) => name.charAt(0).toUpperCase())
-      .join("")
-      .substring(0, 2);
+    const entities = new Map([
+      ["&", "&amp;"],
+      ["<", "&lt;"],
+      [">", "&gt;"],
+      ['"', "&quot;"],
+      ["'", "&#39;"],
+    ]);
+    return text.replace(/[&<>"']/g, (character) => entities.get(character)!);
   }
 }

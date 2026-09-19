@@ -30,6 +30,9 @@ A Visual Studio Code extension that provides a GitHub-like interface for viewing
 
 ### Diff Viewing
 
+- **Review Workspace**: Theme-aware comparison header, change totals, and searchable file navigation
+- **Collapsible Files**: Collapse individual files or all visible files; filters, collapsed sections, and scroll position are retained when refreshing the same comparison
+- **Focused Navigation**: Jump to a file's changes from the file list, or use its filename/open button to open it in the editor
 - **GitHub-Style Diff Display**: View diffs in a familiar GitHub-style webview interface
 - **Progressive Loading**: Files load with progress indication for large diffs
 - **Real-time Refresh**: Reload button to update diffs without reopening

@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.tools/**
 src/**
 test/**
 CLAUDE.md

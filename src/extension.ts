@@ -197,6 +197,27 @@ export function activate(context: vscode.ExtensionContext) {
           compareRef,
           file.path,
         );
+        panel.webview.onDidReceiveMessage(
+          async (message) => {
+            if (message.command !== "openFile") {
+              return;
+            }
+            try {
+              const document = await vscode.workspace.openTextDocument(
+                vscode.Uri.joinPath(workspaceFolder.uri, file.path),
+              );
+              await vscode.window.showTextDocument(document, {
+                viewColumn: vscode.ViewColumn.Beside,
+              });
+            } catch (error: any) {
+              vscode.window.showErrorMessage(
+                `Failed to open file: ${error.message}`,
+              );
+            }
+          },
+          undefined,
+          context.subscriptions,
+        );
         panel.webview.html = diffWebviewProvider.getWebviewContent(
           diffContent,
           file.path,
