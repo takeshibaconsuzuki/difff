@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 import simpleGit, { SimpleGit, DiffResult } from "simple-git";
 import { execFile } from "child_process";
 
+function compareFilePaths(a: { path: string }, b: { path: string }): number {
+  return a.path.localeCompare(b.path);
+}
+
 export class GitService {
   private git: SimpleGit;
   private repositoryRoot?: Promise<string>;
@@ -162,12 +166,14 @@ export class GitService {
       const diffPromise = this.git.diffSummary([`${base}...${compare}`]);
       const diffSummary = await Promise.race([diffPromise, timeoutPromise]);
 
-      return diffSummary.files.map((file: any) => ({
-        path: file.file,
-        status: this.getFileStatus(file),
-        additions: ("insertions" in file ? file.insertions : 0) || 0,
-        deletions: ("deletions" in file ? file.deletions : 0) || 0,
-      }));
+      return diffSummary.files
+        .map((file: any) => ({
+          path: file.file,
+          status: this.getFileStatus(file),
+          additions: ("insertions" in file ? file.insertions : 0) || 0,
+          deletions: ("deletions" in file ? file.deletions : 0) || 0,
+        }))
+        .sort(compareFilePaths);
     } catch (error) {
       console.error("Error getting diff files:", error);
       throw error; // Re-throw to handle in extension
@@ -307,7 +313,7 @@ export class GitService {
         });
       }
 
-      return files;
+      return files.sort(compareFilePaths);
     } catch (error) {
       console.error("Error getting working directory files:", error);
       throw error; // Re-throw to handle in extension
