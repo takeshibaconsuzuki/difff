@@ -202,6 +202,8 @@ export const webviewStyles = `
     .comment-thread-collapsed .comment-thread-toggle { transform: rotate(-90deg); }
     .comment-item, .comment-form { display: flex; gap: 10px; padding: 14px; }
     .comment-item + .comment-item { border-top: 1px solid var(--border); }
+    .comment-item { scroll-margin-top: calc(var(--header-height) + 16px); }
+    .comment-item.comment-highlight { background: var(--hover); box-shadow: inset 3px 0 var(--accent); }
     .comment-avatar, .comment-form-avatar { flex-shrink: 0; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--hover); color: var(--accent); font: 600 10px/1 sans-serif; }
     .comment-body, .comment-form-body { flex: 1; min-width: 0; }
     .comment-header { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; margin-bottom: 5px; }

@@ -47,6 +47,12 @@ async function loadPage(page, html, state = {}) {
   </script>`,
     ),
   );
+  await page.waitForFunction(() =>
+    window.messages.some((message) => message.command === "webviewReady"),
+  );
+  await page.evaluate(() => {
+    window.messages = [];
+  });
 }
 
 test("file filtering, navigation, collapse and editor actions work in both review modes", async (t) => {
@@ -285,5 +291,120 @@ test("empty views and long paths fit narrow editors with theme colors", async (t
       `Page overflow at ${width}px`,
     );
     assert.equal(layout.background, "rgb(31, 31, 31)");
+  }
+});
+
+test("sidebar comment jumps reveal the exact comment through filters and collapsed sections", async (t) => {
+  const provider = createWebviewProvider();
+  const longFiles = Array.from({ length: 8 }, (_, index) => ({
+    ...files[0],
+    path: `src/file-${index}.ts`,
+  }));
+  const comment = {
+    id: 'comment-"target',
+    filePath: longFiles[6].path,
+    lineNumber: 2,
+    lineType: "addition",
+    content: "Jump here",
+    author: "Reviewer",
+    timestamp: Date.now(),
+  };
+  const comments = new Map([
+    [
+      comment.filePath,
+      [
+        {
+          ...comment,
+          id: "other-comment",
+          content: "Another comment on the same line",
+        },
+        comment,
+      ],
+    ],
+  ]);
+  for (const mode of ["branch", "working"]) {
+    await t.test(mode, async (t) => {
+      const html =
+        mode === "branch"
+          ? provider.getAllDiffsContent(longFiles, "main", "feature", comments)
+          : provider.getWorkingDirectoryContent(longFiles, comments);
+      const page = await openPage(t, html);
+      // Reload with state restoration, just as a new webview does before ready.
+      const saved = await page.evaluate(() => window.reviewState);
+      await loadPage(page, html, { ...saved, scrollY: 0 });
+      await page.locator(".comment-thread-header").click();
+      await page
+        .getByRole("button", { name: "Collapse all", exact: true })
+        .click();
+      await page.locator("#file-search").fill("file-0");
+      await page.evaluate((commentId) => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: { command: "revealComment", commentId },
+          }),
+        );
+      }, comment.id);
+      assert.equal(await page.locator("#file-search").inputValue(), "");
+      assert.equal(await page.locator(".file-body:visible").count(), 1);
+      assert.equal(
+        await page
+          .locator(".comment-thread-header")
+          .getAttribute("aria-expanded"),
+        "true",
+      );
+      assert.equal(
+        await page
+          .locator(".comment-highlight")
+          .getAttribute("data-comment-id"),
+        comment.id,
+      );
+      const position = await page
+        .locator(".comment-highlight")
+        .evaluate((item) => ({
+          top: item.getBoundingClientRect().top,
+          bottom: item.getBoundingClientRect().bottom,
+          headerBottom: document
+            .querySelector(".page-header")
+            .getBoundingClientRect().bottom,
+          height: innerHeight,
+          scrollY,
+          focused: document.activeElement === item,
+        }));
+      assert(position.scrollY > 0, "Scrolls down to the comment");
+      assert(
+        position.top >= position.headerBottom,
+        "Comment clears the sticky header",
+      );
+      assert(
+        position.bottom <= position.height,
+        "Comment is within the viewport",
+      );
+      assert(position.focused);
+      assert.deepEqual(await page.evaluate(() => window.messages.pop()), {
+        command: "commentRevealed",
+        commentId: comment.id,
+      });
+      assert(
+        !(await page
+          .locator(".file-diff")
+          .nth(6)
+          .locator(".file-body")
+          .isHidden()),
+      );
+      const afterJump = await page.evaluate(() => window.reviewState);
+      assert(!afterJump.collapsed.includes(comment.filePath));
+      assert(afterJump.scrollY > 0);
+      await page.evaluate(() =>
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: { command: "revealComment", commentId: "missing" },
+          }),
+        ),
+      );
+      assert.equal(
+        await page.locator("#review-status").textContent(),
+        "This comment is no longer visible in this diff.",
+      );
+    });
   }
 });

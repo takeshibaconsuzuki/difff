@@ -7,12 +7,34 @@ import {
 } from "./diffExplorer";
 import { GitService } from "./gitService";
 import { DiffWebviewProvider, FileDiff } from "./webviewProvider";
-import { CommentService } from "./commentService";
+import { CommentService, DiffComment } from "./commentService";
 import { CommentExplorerProvider, CommentKey } from "./commentExplorer";
 import {
   CommentTemplateProvider,
   CommentTemplateItem,
 } from "./commentTemplateProvider";
+
+interface DiffView {
+  panel: vscode.WebviewPanel;
+  ready: boolean;
+  disposed: boolean;
+  pendingCommentId?: string;
+  refresh?: () => Promise<void>;
+}
+
+function revealPendingComment(view: DiffView): void {
+  if (
+    view.ready &&
+    !view.disposed &&
+    view.panel.visible &&
+    view.pendingCommentId
+  ) {
+    void view.panel.webview.postMessage({
+      command: "revealComment",
+      commentId: view.pendingCommentId,
+    });
+  }
+}
 
 export function activate(context: vscode.ExtensionContext) {
   // Check if we're in a git repository
@@ -45,6 +67,7 @@ export function activate(context: vscode.ExtensionContext) {
     context,
     commentService,
   );
+  const diffViews = new Map<string, DiffView>();
 
   vscode.window.registerTreeDataProvider(
     "difff.explorer",
@@ -243,11 +266,78 @@ export function activate(context: vscode.ExtensionContext) {
 
   const viewDiffCommand = vscode.commands.registerCommand(
     "difff.viewDiff",
-    async () => {
-      const mode = diffExplorerProvider.getMode();
+    async (comment?: DiffComment) => {
+      const mode = comment
+        ? comment.compareRef === "working"
+          ? "working"
+          : "branch"
+        : diffExplorerProvider.getMode();
+      // Capture the comparison so other tabs cannot change this view's context.
+      const viewBaseRef = comment?.baseRef ?? diffExplorerProvider.getBaseRef();
+      const viewCompareRef =
+        comment?.compareRef ?? diffExplorerProvider.getCompareRef();
+      if (mode === "branch" && (!viewBaseRef || !viewCompareRef)) {
+        vscode.window.showErrorMessage(
+          "Please select branches to compare first",
+        );
+        return;
+      }
+      const key = JSON.stringify(
+        mode === "working" ? [mode] : [mode, viewBaseRef, viewCompareRef],
+      );
+      const existing = diffViews.get(key);
+      if (existing) {
+        if (comment) {
+          existing.pendingCommentId = comment.id;
+        }
+        existing.panel.reveal(existing.panel.viewColumn);
+        revealPendingComment(existing);
+        if (!comment && existing.refresh) {
+          try {
+            await existing.refresh();
+          } catch (error: any) {
+            vscode.window.showErrorMessage(
+              `Failed to refresh diff: ${error.message}`,
+            );
+          }
+        }
+        return;
+      }
+
+      const title =
+        mode === "working"
+          ? "Working Directory Changes"
+          : `${viewBaseRef} → ${viewCompareRef}`;
+      const panel = vscode.window.createWebviewPanel(
+        "difff.diffView",
+        `Diff: ${title}`,
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true },
+      );
+      const view: DiffView = {
+        panel,
+        ready: false,
+        disposed: false,
+        pendingCommentId: comment?.id,
+      };
+      // Register before loading Git data so repeated clicks reuse the loading tab.
+      diffViews.set(key, view);
+      panel.onDidDispose(
+        () => {
+          view.disposed = true;
+          diffViews.delete(key);
+        },
+        undefined,
+        context.subscriptions,
+      );
+      panel.onDidChangeViewState(
+        () => revealPendingComment(view),
+        undefined,
+        context.subscriptions,
+      );
 
       // Show loading message
-      vscode.window.withProgress(
+      await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title:
@@ -260,11 +350,9 @@ export function activate(context: vscode.ExtensionContext) {
           try {
             let diffFiles: any[] = [];
             let fileDiffs: FileDiff[] = [];
-            let title = "";
 
             if (mode === "working") {
               // Working directory mode
-              title = "Working Directory Changes";
               diffFiles = await gitService.getWorkingDirectoryFiles();
 
               for (let i = 0; i < diffFiles.length; i++) {
@@ -286,17 +374,8 @@ export function activate(context: vscode.ExtensionContext) {
               }
             } else {
               // Branch comparison mode
-              const baseRef = diffExplorerProvider.getBaseRef();
-              const compareRef = diffExplorerProvider.getCompareRef();
-
-              if (!baseRef || !compareRef) {
-                vscode.window.showErrorMessage(
-                  "Please select branches to compare first",
-                );
-                return;
-              }
-
-              title = `${baseRef} → ${compareRef}`;
+              const baseRef = viewBaseRef;
+              const compareRef = viewCompareRef;
               diffFiles = await gitService.getDiffFiles(baseRef, compareRef);
 
               for (let i = 0; i < diffFiles.length; i++) {
@@ -320,22 +399,22 @@ export function activate(context: vscode.ExtensionContext) {
               }
             }
 
-            // Create webview panel
-            const panel = vscode.window.createWebviewPanel(
-              "difff.diffView",
-              `Diff: ${title}`,
-              vscode.ViewColumn.One,
-              {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-              },
-            );
+            if (view.disposed) {
+              return;
+            }
 
             // Set up message handling for reload button and comments
             panel.webview.onDidReceiveMessage(
               async (message) => {
                 try {
-                  if (message.command === "openFile") {
+                  if (message.command === "webviewReady") {
+                    view.ready = true;
+                    revealPendingComment(view);
+                  } else if (message.command === "commentRevealed") {
+                    if (view.pendingCommentId === message.commentId) {
+                      view.pendingCommentId = undefined;
+                    }
+                  } else if (message.command === "openFile") {
                     // Open the file in the editor
                     const filePath = message.filePath;
                     if (!filePath) return;
@@ -397,11 +476,9 @@ export function activate(context: vscode.ExtensionContext) {
                     const baseRef =
                       mode === "working"
                         ? await gitService.getCurrentCommitHash()
-                        : diffExplorerProvider.getBaseRef();
+                        : viewBaseRef;
                     const compareRef =
-                      mode === "working"
-                        ? "working"
-                        : diffExplorerProvider.getCompareRef();
+                      mode === "working" ? "working" : viewCompareRef;
 
                     commentService.addComment(
                       message.filePath,
@@ -462,11 +539,9 @@ export function activate(context: vscode.ExtensionContext) {
                     const baseRef =
                       mode === "working"
                         ? await gitService.getCurrentCommitHash()
-                        : diffExplorerProvider.getBaseRef();
+                        : viewBaseRef;
                     const compareRef =
-                      mode === "working"
-                        ? "working"
-                        : diffExplorerProvider.getCompareRef();
+                      mode === "working" ? "working" : viewCompareRef;
 
                     const comments =
                       commentTemplateProvider.copyCommentsWithTemplate(
@@ -493,19 +568,42 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Function to refresh webview content
             const refreshWebviewContent = async (shouldRefreshData = false) => {
-              try {
-                let currentFileDiffs = fileDiffs;
+              let currentFileDiffs = fileDiffs;
 
-                // If requested, fetch fresh diff data
-                if (shouldRefreshData) {
-                  if (mode === "working") {
-                    const workingFiles =
-                      await gitService.getWorkingDirectoryFiles();
+              // If requested, fetch fresh diff data
+              if (shouldRefreshData) {
+                if (mode === "working") {
+                  const workingFiles =
+                    await gitService.getWorkingDirectoryFiles();
+                  currentFileDiffs = [];
+
+                  for (const file of workingFiles) {
+                    const content =
+                      await gitService.getWorkingDirectoryFileDiff(file.path);
+                    currentFileDiffs.push({
+                      path: file.path,
+                      content: content,
+                      additions: file.additions,
+                      deletions: file.deletions,
+                    });
+                  }
+                } else {
+                  const baseRef = viewBaseRef;
+                  const compareRef = viewCompareRef;
+
+                  if (baseRef && compareRef) {
+                    const branchFiles = await gitService.getDiffFiles(
+                      baseRef,
+                      compareRef,
+                    );
                     currentFileDiffs = [];
 
-                    for (const file of workingFiles) {
-                      const content =
-                        await gitService.getWorkingDirectoryFileDiff(file.path);
+                    for (const file of branchFiles) {
+                      const content = await gitService.getFileDiff(
+                        baseRef,
+                        compareRef,
+                        file.path,
+                      );
                       currentFileDiffs.push({
                         path: file.path,
                         content: content,
@@ -513,97 +611,77 @@ export function activate(context: vscode.ExtensionContext) {
                         deletions: file.deletions,
                       });
                     }
-                  } else {
-                    const baseRef = diffExplorerProvider.getBaseRef();
-                    const compareRef = diffExplorerProvider.getCompareRef();
-
-                    if (baseRef && compareRef) {
-                      const branchFiles = await gitService.getDiffFiles(
-                        baseRef,
-                        compareRef,
-                      );
-                      currentFileDiffs = [];
-
-                      for (const file of branchFiles) {
-                        const content = await gitService.getFileDiff(
-                          baseRef,
-                          compareRef,
-                          file.path,
-                        );
-                        currentFileDiffs.push({
-                          path: file.path,
-                          content: content,
-                          additions: file.additions,
-                          deletions: file.deletions,
-                        });
-                      }
-                    }
-                  }
-
-                  // Update the cached fileDiffs for future comment operations
-                  fileDiffs = currentFileDiffs;
-                }
-
-                // Get current user info for avatars
-                const gitConfig = vscode.workspace.getConfiguration("git");
-                const currentUser =
-                  gitConfig.get<string>("user.name") ||
-                  require("os").userInfo().username ||
-                  "User";
-
-                // Get comments for each file
-                const commentsMap = new Map<string, any[]>();
-                for (const file of currentFileDiffs) {
-                  if (mode === "working") {
-                    const currentCommitHash =
-                      await gitService.getCurrentCommitHash();
-                    const fileComments = commentService.getComments(
-                      file.path,
-                      currentCommitHash,
-                      "working",
-                    );
-                    commentsMap.set(file.path, fileComments);
-                  } else {
-                    const baseRef = diffExplorerProvider.getBaseRef();
-                    const compareRef = diffExplorerProvider.getCompareRef();
-                    const fileComments = commentService.getComments(
-                      file.path,
-                      baseRef,
-                      compareRef,
-                    );
-                    commentsMap.set(file.path, fileComments);
                   }
                 }
 
-                // Set webview content
+                // Update the cached fileDiffs for future comment operations
+                fileDiffs = currentFileDiffs;
+              }
+
+              // Get current user info for avatars
+              const gitConfig = vscode.workspace.getConfiguration("git");
+              const currentUser =
+                gitConfig.get<string>("user.name") ||
+                require("os").userInfo().username ||
+                "User";
+
+              // Get comments for each file
+              const commentsMap = new Map<string, any[]>();
+              for (const file of currentFileDiffs) {
                 if (mode === "working") {
-                  panel.webview.html =
-                    diffWebviewProvider.getWorkingDirectoryContent(
+                  const currentCommitHash =
+                    await gitService.getCurrentCommitHash();
+                  const fileComments = commentService.getComments(
+                    file.path,
+                    currentCommitHash,
+                    "working",
+                  );
+                  commentsMap.set(file.path, fileComments);
+                } else {
+                  const baseRef = viewBaseRef;
+                  const compareRef = viewCompareRef;
+                  const fileComments = commentService.getComments(
+                    file.path,
+                    baseRef,
+                    compareRef,
+                  );
+                  commentsMap.set(file.path, fileComments);
+                }
+              }
+
+              // Set webview content
+              if (view.disposed) {
+                return;
+              }
+              const html =
+                mode === "working"
+                  ? diffWebviewProvider.getWorkingDirectoryContent(
                       currentFileDiffs,
                       commentsMap,
                       currentUser,
+                    )
+                  : diffWebviewProvider.getAllDiffsContent(
+                      currentFileDiffs,
+                      viewBaseRef,
+                      viewCompareRef,
+                      commentsMap,
+                      currentUser,
                     );
-                } else {
-                  const baseRef = diffExplorerProvider.getBaseRef();
-                  const compareRef = diffExplorerProvider.getCompareRef();
-                  panel.webview.html = diffWebviewProvider.getAllDiffsContent(
-                    currentFileDiffs,
-                    baseRef,
-                    compareRef,
-                    commentsMap,
-                    currentUser,
-                  );
-                }
-              } catch (error: any) {
-                vscode.window.showErrorMessage(
-                  `Failed to refresh webview: ${error.message}`,
-                );
+              // VS Code does not reload an unchanged HTML document.
+              if (panel.webview.html !== html) {
+                view.ready = false;
+                panel.webview.html = html;
               }
             };
 
             // Initial content load
             await refreshWebviewContent();
+            view.refresh = () => refreshWebviewContent(true);
           } catch (error: any) {
+            if (view.disposed) {
+              return;
+            }
+            panel.dispose();
             vscode.window.showErrorMessage(
               `Failed to load diffs: ${error.message}`,
             );
@@ -615,7 +693,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const jumpToCommentCommand = vscode.commands.registerCommand(
     "difff.jumpToComment",
-    async (comment: any) => {
+    async (comment: DiffComment) => {
       try {
         // Get the mode and refs to determine how to open the diff
         const mode = comment.compareRef === "working" ? "working" : "branch";
@@ -623,21 +701,16 @@ export function activate(context: vscode.ExtensionContext) {
         if (mode === "working") {
           // Set working directory mode and view diff
           diffExplorerProvider.setMode("working");
-          await vscode.commands.executeCommand("difff.viewDiff");
         } else {
           // Set branch comparison mode with the specific refs
           diffExplorerProvider.setMode("branch");
           await diffExplorerProvider.setRefs(
-            comment.baseRef,
-            comment.compareRef,
+            comment.baseRef || "",
+            comment.compareRef || "",
           );
-          await vscode.commands.executeCommand("difff.viewDiff");
         }
 
-        // Notify user about the jump
-        vscode.window.showInformationMessage(
-          `Jumped to comment in ${comment.filePath} at line ${comment.lineNumber}`,
-        );
+        await vscode.commands.executeCommand("difff.viewDiff", comment);
       } catch (error: any) {
         vscode.window.showErrorMessage(
           `Failed to jump to comment: ${error.message}`,

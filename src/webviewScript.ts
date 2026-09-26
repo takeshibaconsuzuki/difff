@@ -17,6 +17,8 @@ export function getWebviewScript(currentUser: string, viewKey: string): string {
     const status = document.getElementById('review-status');
     let scrollTimer;
     let scrollFrame;
+    let initialized = false;
+    let highlightTimer;
 
     function saveState() {
         vscode.setState({ viewKey, collapsed: [...collapsed], filter: search.value, scrollY: window.scrollY });
@@ -101,6 +103,8 @@ export function getWebviewScript(currentUser: string, viewKey: string): string {
     requestAnimationFrame(() => {
         window.scrollTo(0, saved.scrollY || 0);
         updateActiveFile();
+        initialized = true;
+        vscode.postMessage({ command: 'webviewReady' });
     });
     window.addEventListener('scroll', () => {
         if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { updateActiveFile(); scrollFrame = null; });
@@ -130,6 +134,38 @@ export function getWebviewScript(currentUser: string, viewKey: string): string {
 
     function getComment(id) {
         return document.querySelector('[data-comment-id="' + CSS.escape(id) + '"]');
+    }
+
+    function revealComment(id) {
+        // A sidebar jump takes precedence over the refresh scheduled on focus.
+        clearTimeout(reloadTimer);
+        lastFocusTime = Date.now();
+        const item = getComment(id);
+        if (item) {
+            const file = item.closest('.file-diff');
+            if (file.hidden) {
+                search.value = '';
+                filterFiles();
+            }
+            setCollapsed(file, false);
+            const thread = item.closest('.comment-thread-container');
+            thread.classList.remove('comment-thread-collapsed');
+            thread.querySelector('.comment-thread-header').setAttribute('aria-expanded', 'true');
+            updateCollapseButton();
+            document.querySelectorAll('.comment-highlight').forEach(comment => comment.classList.remove('comment-highlight'));
+            clearTimeout(highlightTimer);
+            item.classList.add('comment-highlight');
+            item.setAttribute('tabindex', '-1');
+            item.scrollIntoView({ block: 'start', behavior: 'auto' });
+            item.focus({ preventScroll: true });
+            highlightTimer = setTimeout(() => item.classList.remove('comment-highlight'), 2000);
+            updateActiveFile();
+            saveState();
+            status.textContent = 'Comment in ' + file.dataset.filePath;
+        } else {
+            status.textContent = 'This comment is no longer visible in this diff.';
+        }
+        vscode.postMessage({ command: 'commentRevealed', commentId: id });
     }
 
     function createCommentForm(content, onSubmit, onCancel, submitLabel) {
@@ -232,6 +268,9 @@ export function getWebviewScript(currentUser: string, viewKey: string): string {
 
     window.addEventListener('message', event => {
         const message = event.data;
+        if (message.command === 'revealComment') {
+            revealComment(message.commentId);
+        }
         if (message.command === 'reloadComplete' && reloadButton) {
             reloadButton.disabled = false;
             reloadButton.classList.remove('loading');
@@ -265,6 +304,11 @@ export function getWebviewScript(currentUser: string, viewKey: string): string {
         lastFocusTime = now;
     }
     window.addEventListener('focus', handleAutoReload);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) handleAutoReload(); });
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            handleAutoReload();
+            if (initialized) vscode.postMessage({ command: 'webviewReady' });
+        }
+    });
   `;
 }
