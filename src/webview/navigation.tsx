@@ -1,5 +1,5 @@
 import { memo, useState, type RefObject } from 'react';
-import { Moon, Search, Sun } from 'lucide-react';
+import { Moon, Search, Sun, WrapText } from 'lucide-react';
 import type { ReviewState, Scope } from '../model';
 import { Button, FileStatus } from './ui';
 
@@ -10,13 +10,14 @@ const scopeDescriptions: Record<Scope, string> = {
   unstaged: 'Index → working tree\nChanges that haven’t been staged, including untracked files.',
 };
 
-export function Toolbar({ review, busy, query, regex, matchCase, commentsOpen, filesOpen, searchCount, hasMatches, queryRef, theme, focused,
-  onScope, onRepository, onQuery, onRegex, onMatchCase, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
+export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, commentsOpen, filesOpen, searchCount, hasMatches, queryRef, theme, focused,
+  onScope, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
   review: ReviewState;
   busy: boolean;
   query: string;
   regex: boolean;
   matchCase: boolean;
+  wordWrap: boolean;
   commentsOpen: boolean;
   filesOpen: boolean;
   searchCount: string;
@@ -30,6 +31,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, commentsOpen, f
   onQuery: (query: string) => void;
   onRegex: () => void;
   onMatchCase: () => void;
+  onWordWrap: () => void;
   onMatch: (direction: number) => void;
   onRefresh: () => void;
   onCopy: () => void;
@@ -58,6 +60,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, commentsOpen, f
       <Button id="previous" title="Previous match (Shift+Enter)" aria-label="Previous match" disabled={!hasMatches} onClick={() => onMatch(-1)}>↑</Button>
       <Button id="next" title="Next match (Enter)" aria-label="Next match" disabled={!hasMatches} onClick={() => onMatch(1)}>↓</Button>
     </div>
+    <Button id="toggle-word-wrap" className="icon-button" title="Toggle word wrap" aria-pressed={wordWrap} onClick={onWordWrap}><WrapText size={16} aria-hidden="true" /></Button>
     <Button id="refresh" title="Refresh changes" disabled={busy} onClick={onRefresh}>↻</Button>
     <Button id="copy" className="primary" disabled={busy || !review.comments.length} onClick={onCopy}>Copy comments</Button>
     <Button id="toggle-comments" className="comments-toggle" aria-expanded={commentsOpen} onClick={onComments}>Comments <span id="comment-count" className="count">{review.comments.length}</span></Button>

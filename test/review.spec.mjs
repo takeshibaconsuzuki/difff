@@ -364,6 +364,7 @@ test('incoming context updates preserve the active draft cursor and horizontal s
   const data = structuredClone(seed);
   data.files[0].hunks[0].lines[0].text = `const wideLine = '${'x'.repeat(240)}';`;
   const errors = await mount(page, data);
+  await page.getByRole('button', { name: 'Toggle word wrap' }).click();
   await page.getByRole('button', { name: 'Comment on src/review.ts:20', exact: true }).click();
   const textarea = page.getByRole('textbox', { name: 'Write a comment' });
   await textarea.fill('Keep this draft and its selection.');
@@ -600,6 +601,7 @@ test('line numbers are text, code is centered, and the hover outline follows hor
   const data = structuredClone(seed);
   data.files[0].hunks[0].lines[0].text = 'long line '.repeat(100);
   await mount(page, data);
+  await page.getByRole('button', { name: 'Toggle word wrap' }).click();
   const card = page.locator('.file-card').first();
   const row = card.locator('.diff-line').nth(1);
   await expect(card.locator('button.line-number')).toHaveCount(0);
@@ -635,6 +637,7 @@ test('short diff lines have no horizontal overflow while long lines remain scrol
   data.comments = [];
   for (const file of data.files) for (const hunk of file.hunks) for (const line of hunk.lines) line.text = 'short';
   await mount(page, data);
+  await page.getByRole('button', { name: 'Toggle word wrap' }).click();
   for (const width of [1440, 1150, 900, 700, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     expect(await page.locator('.code-table').evaluateAll(tables => tables.map(table => table.scrollWidth - table.clientWidth))).toEqual([0, 0, 0]);
@@ -648,6 +651,40 @@ test('short diff lines have no horizontal overflow while long lines remain scrol
   await expect.poll(() => table.evaluate(node => node.scrollWidth - node.clientWidth)).toBeGreaterThan(1000);
   await table.evaluate(node => { node.scrollLeft = 150; });
   expect(await table.evaluate(node => node.scrollLeft)).toBe(150);
+});
+
+test('unwrapping from inside a tall source row keeps it below the sticky header and remembers the choice', async ({ page }) => {
+  const data = structuredClone(seed);
+  const lines = Array.from({ length: 200 }, (_, index) => ({ kind: 'context', text: index === 30 ? 'x'.repeat(20000) : `line ${index + 1}`, oldLine: index + 1, newLine: index + 1 }));
+  data.files = [{ ...file, gaps: [], hunks: [{ header: '@@ -1,200 +1,200 @@', oldStart: 1, oldLines: 200, newStart: 1, newLines: 200, lines }] }];
+  data.comments = [];
+  await mount(page, data);
+  const toggle = page.getByRole('button', { name: 'Toggle word wrap' });
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  const row = page.locator('.diff-line').nth(30);
+  await row.evaluate(node => {
+    const pane = document.querySelector('#diff');
+    const header = document.querySelector('.file-header');
+    pane.scrollTop += node.getBoundingClientRect().top - pane.getBoundingClientRect().top - header.getBoundingClientRect().height + 1500;
+  });
+  const header = await page.locator('.file-header').boundingBox();
+  const before = await row.boundingBox();
+  expect(before.y).toBeLessThan(header.y + header.height - 1000);
+  expect(before.y + before.height).toBeGreaterThan(header.y + header.height);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  const after = await row.boundingBox();
+  const pane = await page.locator('#diff').boundingBox();
+  expect(after.height).toBe(22);
+  expect(after.y).toBeGreaterThanOrEqual(header.y + header.height);
+  expect(after.y + after.height).toBeLessThan(pane.y + pane.height);
+  await expect.poll(() => page.evaluate(() => window.localState.wordWrap)).toBe(false);
+  await page.reload();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await toggle.click();
+  await expect.poll(() => page.evaluate(() => window.localState.wordWrap)).toBe(true);
+  await page.reload();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('sidebar comment bodies jump to centered inline comments and editors; inline Focus opens the panel', async ({ page }) => {

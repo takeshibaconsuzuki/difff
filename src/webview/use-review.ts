@@ -14,6 +14,7 @@ interface UIState {
   query: string;
   regex: boolean;
   matchCase: boolean;
+  wordWrap: boolean;
   theme: 'light' | 'dark';
   notice?: { text: string; error?: boolean };
   pulseSequence: number;
@@ -43,6 +44,7 @@ type Action =
   | { type: 'query'; query: string }
   | { type: 'regex' }
   | { type: 'matchCase' }
+  | { type: 'toggleWordWrap' }
   | { type: 'toggleTheme' };
 
 const initialState: UIState = {
@@ -57,6 +59,7 @@ const initialState: UIState = {
   query: initialLocalState.query ?? '',
   regex: initialLocalState.regex ?? false,
   matchCase: initialLocalState.matchCase ?? false,
+  wordWrap: initialLocalState.wordWrap ?? true,
   theme: initialLocalState.theme ?? (document.body.classList.contains('vscode-light') || document.body.classList.contains('vscode-high-contrast-light') ? 'light' : 'dark'),
 };
 
@@ -120,6 +123,7 @@ function reducer(state: UIState, action: Action): UIState {
     case 'query': return { ...state, query: action.query };
     case 'regex': return { ...state, regex: !state.regex };
     case 'matchCase': return { ...state, matchCase: !state.matchCase };
+    case 'toggleWordWrap': return { ...state, wordWrap: !state.wordWrap };
     case 'toggleTheme': return { ...state, theme: state.theme === 'dark' ? 'light' : 'dark' };
   }
   return state;
@@ -134,8 +138,8 @@ export function useReview() {
     return () => { window.removeEventListener('message', onMessage); };
   }, []);
 
-  const { draft, query, regex, matchCase, theme, review: { scope, repository }, notice, reveal, draftWarning } = state;
-  useEffect(() => { persist({ draft, query, regex, matchCase, theme, scope, repository }); }, [draft, query, regex, matchCase, theme, scope, repository]);
+  const { draft, query, regex, matchCase, wordWrap, theme, review: { scope, repository }, notice, reveal, draftWarning } = state;
+  useEffect(() => { persist({ draft, query, regex, matchCase, wordWrap, theme, scope, repository }); }, [draft, query, regex, matchCase, wordWrap, theme, scope, repository]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => { dispatch({ type: 'clearNotice' }); }, notice.error ? 9000 : 3500);

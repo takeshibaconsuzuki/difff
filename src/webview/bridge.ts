@@ -18,6 +18,7 @@ export interface LocalState {
   query?: string;
   regex?: boolean;
   matchCase?: boolean;
+  wordWrap?: boolean;
   theme?: 'light' | 'dark';
 }
 

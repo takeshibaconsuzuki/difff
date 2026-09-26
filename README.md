@@ -17,6 +17,7 @@ Choose what to review:
 - Click a file on the left or filter by name. Its header arrow opens the editable file on disk in every scope. Deleted files have no arrow.
 - Expand hidden lines with the context buttons, or choose **Expand all** for the whole file.
 - Search with **Find**. Use `.*` for regex and **Aa** for case sensitivity. Expand context to include hidden lines in search.
+- Long source lines wrap by default. Use **Toggle word wrap** in the toolbar to change this; your choice is remembered when the review reloads.
 - Click **Refresh** after changing files or staging changes. This also collapses expanded context.
 - Use the sun or moon button to switch themes.
 

@@ -44,8 +44,14 @@ export function captureDiffPosition(pane: HTMLElement): () => void {
     const header = row.closest('.file-card')?.querySelector('.file-header');
     return rect.bottom > bounds.top + (header?.getBoundingClientRect().height ?? 0) && rect.top < bounds.bottom;
   });
-  const top = row?.getBoundingClientRect().top;
+  const rect = row?.getBoundingClientRect();
   return () => {
-    if (row?.isConnected && top !== undefined) pane.scrollTop += row.getBoundingClientRect().top - top;
+    if (!row?.isConnected || !rect) return;
+    const current = row.getBoundingClientRect();
+    const header = row.closest('.file-card')?.querySelector('.file-header');
+    const visibleTop = pane.getBoundingClientRect().top + (header?.getBoundingClientRect().height ?? 0);
+    // A shrunken row must not retain an offset that hides it behind the header.
+    const top = current.height < rect.height ? Math.max(rect.top, visibleTop) : rect.top;
+    pane.scrollTop += current.top - top;
   };
 }

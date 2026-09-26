@@ -22,6 +22,7 @@ function ReviewApp() {
   const diff = useRef<HTMLElement>(null);
   const navigating = useRef(false);
   const deletionAnchor = useRef<{ id: string; restore: () => void } | undefined>(undefined);
+  const wrapAnchor = useRef<(() => void) | undefined>(undefined);
   const comments = useRef<HTMLDivElement>(null);
   const queryInput = useRef<HTMLInputElement>(null);
   const fileFilter = useRef<HTMLInputElement>(null);
@@ -49,6 +50,12 @@ function ReviewApp() {
       revealFileLink(active.dataset.path);
     }
   }, [dispatch]);
+
+  useLayoutEffect(() => {
+    wrapAnchor.current?.();
+    wrapAnchor.current = undefined;
+    syncVisibleFile();
+  }, [state.wordWrap, syncVisibleFile]);
 
   useEffect(() => {
     const pane = diff.current;
@@ -205,6 +212,10 @@ function ReviewApp() {
 
   return <>
     <Toolbar review={review} busy={busy} query={state.query} regex={state.regex} matchCase={state.matchCase} commentsOpen={state.commentsOpen} filesOpen={state.filesOpen} theme={state.theme} focused={focused} onTheme={() => { dispatch({ type: 'toggleTheme' }); }}
+      wordWrap={state.wordWrap} onWordWrap={() => {
+        if (diff.current) wrapAnchor.current = captureDiffPosition(diff.current);
+        dispatch({ type: 'toggleWordWrap' });
+      }}
       searchCount={searchCount} hasMatches={!!search.result.matches.length} queryRef={queryInput} onScope={changeScope}
       onRepository={root => {
         if (busy || root === repository) return;
@@ -217,7 +228,7 @@ function ReviewApp() {
     <div id="search-error" role="status">{search.result.error}</div>
     <div id="workspace" className={`workspace${state.commentsOpen ? '' : ' hide-comments'}${state.filesOpen ? ' show-files' : ''}`}>
       <FilesPane key={JSON.stringify([repository, scope])} review={review} activePath={state.activePath} jump={jumpToFile} filterRef={fileFilter} />
-      <main id="diff" ref={diff} aria-label="Diff review" tabIndex={-1} aria-busy={busy}>
+      <main id="diff" ref={diff} className={state.wordWrap ? 'word-wrap' : undefined} aria-label="Diff review" tabIndex={-1} aria-busy={busy}>
         {draft && !draftFile && <Composer draft={draft} busy={busy} saving={saving} handlers={draftHandlers} />}
         {!loading && (review.error || !review.files.length) && <div className="diff-empty"><p>{review.error ?? `No ${scope} changes.`}</p></div>}
         {review.files.map(file => <DiffFile key={JSON.stringify([repository, scope, file.path])} file={file} comments={commentsByFile.get(file.path) ?? noComments}
