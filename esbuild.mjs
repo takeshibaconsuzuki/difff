@@ -17,9 +17,23 @@ const options = {
   sourcesContent: false,
   logLevel: 'info',
 };
+const webviewOptions = {
+  entryPoints: ['src/webview/review.tsx'],
+  outdir: 'dist',
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: 'es2022',
+  define: { 'process.env.NODE_ENV': JSON.stringify(production ? 'production' : 'development') },
+  minify: production,
+  // Worker code is serialized from a function; preserve its name without esbuild helpers.
+  sourcemap: !production,
+  sourcesContent: false,
+  logLevel: 'info',
+};
 
 if (development) {
-  const context = await esbuild.context(options);
+  const contexts = await Promise.all([esbuild.context(options), esbuild.context(webviewOptions)]);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
@@ -27,10 +41,10 @@ if (development) {
 
   try {
     // Finish the first build before opening VS Code, then keep rebuilding on save.
-    await context.rebuild();
-    await context.watch();
+    await Promise.all(contexts.map(context => context.rebuild()));
+    await Promise.all(contexts.map(context => context.watch()));
     console.log('Opening the Extension Development Host without the debugger.');
-    console.log('Run "difff: Hello World" there. After saving, reload only that window.');
+    console.log('Run "difff: Review Changes" there. After saving, reload only that window.');
     console.log('Keep this terminal running. Close the host window or press Ctrl+C to stop.');
 
     const env = { ...process.env };
@@ -52,10 +66,10 @@ if (development) {
   } catch (error) {
     if (!controller.signal.aborted) throw error;
   } finally {
-    await context.dispose();
+    await Promise.all(contexts.map(context => context.dispose()));
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
   }
 } else {
-  await esbuild.build(options);
+  await Promise.all([esbuild.build(options), esbuild.build(webviewOptions)]);
 }

@@ -1,7 +1,7 @@
 {
   "name": "difff",
   "displayName": "difff",
-  "description": "A minimal VS Code extension scaffold.",
+  "description": "A focused local diff review with line comments, Git scopes, and searchable context.",
   "version": "0.0.1",
   "publisher": "local-dev",
   "private": true,
@@ -15,20 +15,44 @@
     "node": ">=24"
   },
   "categories": [
-    "Other"
+    "SCM Providers"
   ],
   "main": "./dist/extension.js",
   "files": [
-    "dist/extension.js"
+    "dist/extension.js",
+    "dist/review.js",
+    "dist/review.css"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "difff.helloWorld",
-        "title": "Hello World",
-        "category": "difff"
+        "command": "difff.openReview",
+        "title": "Review Changes",
+        "category": "difff",
+        "icon": "$(diff)"
       }
-    ]
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "difff.openReview",
+          "group": "navigation",
+          "when": "scmProvider == git"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "difff.openReview",
+          "group": "navigation@20"
+        }
+      ]
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "difff invokes Git to review workspace changes."
+    }
   },
   "scripts": {
     "check-types": "tsc --noEmit",
@@ -38,16 +62,23 @@
     "dev": "npm run check-types && node esbuild.mjs --dev",
     "vscode:prepublish": "npm run check && node esbuild.mjs --production",
     "pretest": "npm run compile",
-    "test": "node test/run.mjs",
+    "test": "npm run test:unit && npm run test:ui && node test/run.mjs",
+    "test:unit": "node --test test/git.test.mjs",
+    "test:ui": "playwright test",
     "build": "vsce package --no-dependencies --skip-license"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.19.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/vscode": "1.138.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
     "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.12.0",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.70.1"
@@ -55,5 +86,13 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "@vscode/vsce-sign@2.1.0": true
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "lucide-react": "^1.48.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "simple-git": "^4.0.1",
+    "zod": "^4.6.5"
   }
 }

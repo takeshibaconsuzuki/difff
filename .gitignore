@@ -5,3 +5,5 @@ dist/
 *.vsix
 *.log
 __pycache__/
+test-results/
+playwright-report/
