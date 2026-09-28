@@ -57,7 +57,7 @@ try {
   await writeFile(path.join(directory, 'unstaged-renamed.txt'), 'untracked one\nuntracked two\nuntracked three\nchanged\n');
 
   await runTests({
-    version: '1.138.0',
+    version: '1.137.0',
     extensionDevelopmentPath: fileURLToPath(new URL('../', import.meta.url)),
     extensionTestsPath: fileURLToPath(new URL('./extension.test.cjs', import.meta.url)),
     launchArgs: [directory, '--disable-extensions', '--skip-welcome', '--disable-workspace-trust', `--remote-debugging-port=${port}`],

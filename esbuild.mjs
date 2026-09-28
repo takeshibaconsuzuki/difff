@@ -59,7 +59,7 @@ if (development) {
       `--extensions-dir=${fileURLToPath(new URL('./.vscode-test/dev-extensions', import.meta.url))}`,
       ...process.argv.slice(process.argv.indexOf('--dev') + 1),
     ], {
-      version: '1.138.0',
+      version: '1.137.0',
       // The test helper hides Windows processes by default; this host is interactive.
       spawn: { env, signal: controller.signal, windowsHide: false },
     });

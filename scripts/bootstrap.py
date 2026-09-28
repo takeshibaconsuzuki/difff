@@ -1,4 +1,4 @@
-"""Install project-local Node.js 24 LTS and print shell activation commands."""
+"""Install project-local Node.js and dependencies, then print shell activation commands."""
 
 import hashlib
 import json
@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import shlex
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -55,7 +56,11 @@ def main():
                     bundle.extractall(directory)
             else:
                 with tarfile.open(archive) as bundle:
-                    bundle.extractall(directory, filter="data")
+                    if hasattr(tarfile, "data_filter"):
+                        bundle.extractall(directory, filter="data")
+                    else:
+                        # Older Python: trust only the official archive verified above.
+                        bundle.extractall(directory)
             (directory / name).rename(install)
 
     # Keep npm's cache and any explicit npm --global installs inside this project.
@@ -63,6 +68,28 @@ def main():
         "npm_config_cache": str(TOOLS / "npm-cache"),
         "npm_config_prefix": str(TOOLS / "npm-global"),
     }
+    dependency_hash = hashlib.sha256(
+        (ROOT / "package.json").read_bytes() + b"\0" + (ROOT / "package-lock.json").read_bytes()
+    ).hexdigest()
+    stamp = ROOT / "node_modules" / ".bootstrap-hash"
+    if not stamp.is_file() or stamp.read_text() != dependency_hash:
+        npm_root = install if system == "win" else install / "lib"
+        npm_cli = npm_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        environment = os.environ.copy()
+        environment.update(paths)
+        environment["PATH"] = str(binary_dir) + os.pathsep + environment.get("PATH", "")
+        print("Installing project dependencies...", file=sys.stderr)
+        # stdout must contain only activation commands, since callers evaluate it.
+        subprocess.run(
+            [str(node), str(npm_cli), "ci", "--include=dev"],
+            cwd=ROOT,
+            env=environment,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            check=True,
+        )
+        stamp.write_text(dependency_hash)
+
     if os.name == "nt":
         quote = lambda value: "'" + value.replace("'", "''") + "'"
         print(f"$env:Path = {quote(str(binary_dir))} + [IO.Path]::PathSeparator + $env:Path")
