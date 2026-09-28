@@ -19,6 +19,7 @@ export interface LocalState {
   regex?: boolean;
   matchCase?: boolean;
   wordWrap?: boolean;
+  ignoreWhitespace?: boolean;
   theme?: 'light' | 'dark';
 }
 

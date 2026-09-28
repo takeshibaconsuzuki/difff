@@ -19,6 +19,7 @@ Choose what to review:
 - Expand hidden lines with the context buttons, or choose **Expand all** for the whole file.
 - Search with **Find**. Use `.*` for regex and **Aa** for case sensitivity. Expand context to include hidden lines in search.
 - Long source lines wrap by default. Use **Toggle word wrap** in the toolbar to change this; your choice is remembered when the review reloads.
+- **Ignore whitespace** is on by default, matching `git diff -w`: changes to spaces and tabs within lines are ignored, while added or removed lines remain visible. Turn it off in the toolbar to review whitespace changes. Your choice is remembered when the review reloads.
 - Click **Refresh** after changing files or staging changes. This also collapses expanded context.
 - Use the sun or moon button to switch themes.
 

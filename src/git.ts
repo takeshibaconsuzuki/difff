@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parsePatch, structuredPatch, type StructuredPatchHunk } from 'diff';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import type { DiffLine, Hunk, ReviewFile, Scope, Side } from './model';
-import { contextGaps, expandAllContext, expandContext, header, revealContextLine } from './context';
+import { contextGaps, expandAllContext, expandContext, header, revealContextLine, type ContextSource } from './context';
 import { withUntrackedComparison } from './git-renames';
 
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -41,9 +41,9 @@ function toHunk(hunk: StructuredPatchHunk): Hunk {
 
 export class GitReview {
   private readonly git: SimpleGit;
-  private readonly sources = new Map<string, string[]>();
+  private readonly sources = new Map<string, ContextSource>();
 
-  constructor(readonly root: string) {
+  constructor(readonly root: string, private readonly ignoreWhitespace = true) {
     this.git = simpleGit({ baseDir: root, maxConcurrentProcesses: 4, timeout: { block: 30000 }, allowEnvironment: ['GIT_LITERAL_PATHSPECS', 'GIT_OPTIONAL_LOCKS'] });
     // Paths are passed as separate argv entries; literal pathspecs also handle [] and leading colons.
     this.git.env('GIT_LITERAL_PATHSPECS', '1').env('GIT_OPTIONAL_LOCKS', '0');
@@ -124,7 +124,7 @@ export class GitReview {
     return source ? revealContextLine(file, source, side, line) : file;
   }
 
-  private async patch(file: string, base: string[], originalPath?: string, git = this.git): Promise<string> {
+  private async patch(file: string, base: string[], originalPath?: string, git = this.git, context = 3): Promise<string> {
     let revisions = base;
     let paths = [file];
     let renames = '--find-renames';
@@ -147,7 +147,7 @@ export class GitReview {
       }
     }
     // Preserve the context prefix on blank lines so parsing advances both line counters.
-    const patch = await git.raw(['-c', 'diff.suppressBlankEmpty=false', 'diff', ...revisions, '--no-ext-diff', '--no-textconv', '--no-color', renames, '--src-prefix=a/', '--dst-prefix=b/', '--submodule=short', '--unified=3', '--', ...paths]);
+    const patch = await git.raw(['-c', 'diff.suppressBlankEmpty=false', 'diff', ...revisions, '--no-ext-diff', '--no-textconv', '--no-color', renames, '--src-prefix=a/', '--dst-prefix=b/', '--submodule=short', `--unified=${context}`, ...(this.ignoreWhitespace ? ['--ignore-all-space'] : []), '--', ...paths]);
     if (!selectPair) return patch;
     // Isolate the gitlink before the per-file size check. Parse only section
     // headers so unrelated large hunks are never expanded into patch objects.
@@ -193,6 +193,7 @@ export class GitReview {
         }
       } else {
         const patch = renamePatch ?? await this.patch(file, base, originalPath);
+        if (!patch && status === 'M' && !originalPath) return undefined;
         if (Buffer.byteLength(patch) > MAX_BYTES) return { ...result, notice: 'Diff exceeds the 2 MB preview limit. Open it in the editor to review.' };
         // Validate that the patch still belongs to the detected rename pair.
         const parts = parsePatch(patch).filter(part => !originalPath || part.oldFileName === `a/${originalPath}` && part.newFileName === `b/${file}`);
@@ -213,10 +214,42 @@ export class GitReview {
           const source = original === '' ? [] : original.split('\n');
           if (source.at(-1) === '') source.pop();
           const normalized = source.map(line => line.replace(/\r$/, ''));
-          const matches = result.hunks.every(hunk => hunk.lines.every(line => line.oldLine === undefined || normalized[line.oldLine - 1] === line.text));
+          // Git emits the new spelling of context when -w matches differently spaced lines.
+          const matches = result.hunks.every(hunk => hunk.lines.every(line => {
+            if (line.oldLine === undefined) return true;
+            const oldText = normalized[line.oldLine - 1];
+            if (oldText === line.text) return true;
+            if (!this.ignoreWhitespace || line.kind !== 'context' || oldText === undefined || oldText.replace(/[ \t\r\v\f]/g, '') !== line.text.replace(/[ \t\r\v\f]/g, '')) return false;
+            line.oldText = oldText;
+            return true;
+          }));
           if (matches) {
-            this.sources.set(result.snapshot, normalized);
-            result.gaps = contextGaps(result.hunks, normalized.length);
+            const gaps = contextGaps(result.hunks, normalized.length);
+            let updated: string[] | undefined;
+            if (this.ignoreWhitespace && gaps.length) {
+              updated = [];
+              // Read expanded context through Git as well, preserving clean filters and attributes.
+              const contextBase = recreated ? [`${base[0] ?? 'HEAD'}:${file}`] : base;
+              const fullPatch = await this.patch(file, contextBase, originalPath, this.git, normalized.length);
+              if (Buffer.byteLength(fullPatch) > MAX_BYTES) {
+                return { ...result, notice: 'Additional context exceeds the 2 MB source limit. Open the file to see more.' };
+              }
+              const fullHunks = parsePatch(fullPatch).flatMap(part => part.hunks).map(toHunk);
+              for (const hunk of fullHunks) for (const line of hunk.lines) if (line.newLine !== undefined) updated[line.newLine - 1] = line.text;
+              const newSource = updated;
+              // More context can expose an unchanged EOF note; retain only notes attached to edits.
+              const changes = (hunks: Hunk[]) => JSON.stringify(hunks.flatMap(hunk => hunk.lines.filter((line, index, lines) =>
+                line.kind === 'add' || line.kind === 'delete'
+                || line.kind === 'note' && (lines[index - 1]?.kind === 'add' || lines[index - 1]?.kind === 'delete'))));
+              const stable = fullHunks.length === 1 && fullHunks[0]?.oldStart === 1 && fullHunks[0].oldLines === normalized.length
+                && changes(fullHunks) === changes(result.hunks)
+                && result.hunks.every(hunk => hunk.lines.every(line => line.newLine === undefined || newSource[line.newLine - 1] === line.text));
+              if (!stable) {
+                return { ...result, notice: 'Source changed while loading. Refresh to expand context.' };
+              }
+            }
+            result.gaps = gaps;
+            this.sources.set(result.snapshot, { old: normalized, new: updated });
           } else result.notice = 'Source changed while loading. Refresh to expand context.';
         } else result.notice = 'Additional context exceeds the 2 MB source limit. Open the file to see more.';
       }

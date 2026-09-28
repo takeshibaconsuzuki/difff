@@ -20,7 +20,8 @@ const anchorSchema = z.object({
 });
 
 export const messageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('ready'), scope: scopeSchema.optional(), repository: z.string().optional() }),
+  z.object({ type: z.literal('ready'), scope: scopeSchema.optional(), repository: z.string().optional(), ignoreWhitespace: z.boolean().optional() }),
+  z.object({ type: z.literal('ignoreWhitespace'), ignoreWhitespace: z.boolean() }),
   z.object({ type: z.literal('refresh') }),
   z.object({ type: z.literal('scope'), scope: scopeSchema }),
   z.object({ type: z.literal('repository'), root: z.string() }),

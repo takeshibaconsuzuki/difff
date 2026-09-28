@@ -216,6 +216,13 @@ function ReviewApp() {
         if (diff.current) wrapAnchor.current = captureDiffPosition(diff.current);
         dispatch({ type: 'toggleWordWrap' });
       }}
+      onIgnoreWhitespace={() => {
+        if (busy) return;
+        if (draft) { dispatch({ type: 'requireDraft', text: 'Save or cancel your draft before changing whitespace handling.' }); return; }
+        const message = { type: 'ignoreWhitespace', ignoreWhitespace: !review.ignoreWhitespace } as const;
+        dispatch(message);
+        post(message);
+      }}
       searchCount={searchCount} hasMatches={!!search.result.matches.length} queryRef={queryInput} onScope={changeScope}
       onRepository={root => {
         if (busy || root === repository) return;
@@ -230,7 +237,7 @@ function ReviewApp() {
       <FilesPane key={JSON.stringify([repository, scope])} review={review} activePath={state.activePath} jump={jumpToFile} filterRef={fileFilter} />
       <main id="diff" ref={diff} className={state.wordWrap ? 'word-wrap' : undefined} aria-label="Diff review" tabIndex={-1} aria-busy={busy}>
         {draft && !draftFile && <Composer draft={draft} busy={busy} saving={saving} handlers={draftHandlers} />}
-        {!loading && (review.error || !review.files.length) && <div className="diff-empty"><p>{review.error ?? `No ${scope} changes.`}</p></div>}
+        {!loading && (review.error || !review.files.length) && <div className="diff-empty"><p>{review.error ?? `No ${scope} changes${review.ignoreWhitespace ? ' with whitespace ignored' : ''}.`}</p></div>}
         {review.files.map(file => <DiffFile key={JSON.stringify([repository, scope, file.path])} file={file} comments={commentsByFile.get(file.path) ?? noComments}
           draft={draftFile === file ? draft : undefined} busy={busy} saving={saving} startDraft={startDraft} draftHandlers={draftHandlers} commentHandlers={commentHandlers}
           matches={search.byRow} activeMatch={search.index} flashRow={state.reveal?.rowId} pulseSequence={state.reveal?.sequence ?? 0} />)}

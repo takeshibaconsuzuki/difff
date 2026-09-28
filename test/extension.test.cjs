@@ -50,6 +50,17 @@ exports.run = async function run() {
       await review.locator(`[data-scope="${scope}"]`).click();
       await expect(diff).toHaveAttribute('aria-busy', 'false');
       await expect(review.locator('.file-card[data-path="review.txt"]')).toBeVisible();
+      const ignoreWhitespace = review.getByRole('button', { name: 'Ignore whitespace', exact: true });
+      const spacing = review.locator('.file-card[data-path="spacing.txt"]');
+      await expect(ignoreWhitespace).toHaveAttribute('aria-pressed', 'true');
+      await expect(spacing).toHaveCount(0);
+      await ignoreWhitespace.click();
+      await expect(diff).toHaveAttribute('aria-busy', 'false');
+      await expect(spacing.locator('.diff-line.add')).toHaveCount(1);
+      await expect(spacing.locator('.diff-line.delete')).toHaveCount(1);
+      await ignoreWhitespace.click();
+      await expect(diff).toHaveAttribute('aria-busy', 'false');
+      await expect(spacing).toHaveCount(0);
       if (scope !== 'unstaged') {
         const deleted = review.locator('.file-card[data-path="deleted.txt"]');
         await expect(deleted).toBeVisible();

@@ -17,7 +17,7 @@ const file = {
   ] }],
 };
 const seed = {
-  repositories: [{ root: '/workspace/difff', name: 'difff' }], repository: '/workspace/difff', branch: 'feature/local-review', scope: 'uncommitted',
+  repositories: [{ root: '/workspace/difff', name: 'difff' }], repository: '/workspace/difff', branch: 'feature/local-review', scope: 'uncommitted', ignoreWhitespace: true,
   files: [file, { ...file, path: 'src/components/toolbar.ts', status: 'A', additions: 4, deletions: 0 }, { ...file, path: 'README.md', additions: 2, deletions: 1 }],
   comments: [{ id: 'existing', repository: '/workspace/difff', path: 'src/review.ts', line: 19, side: 'new', code: '  const files = await git.diff(scope);', scope: 'uncommitted', body: 'Could we keep untracked files in this view too? It would make the full review easier to follow.', createdAt: '2026-01-01' }],
 };
@@ -41,7 +41,7 @@ async function mount(page, initial = seed) {
     const sources = Object.fromEntries(initial.files.map(file => {
       const lines = Array.from({ length: file.totalOldLines ?? 50 }, (_, index) => `context ${index + 1}`);
       for (const hunk of file.hunks) for (const line of hunk.lines) if (line.oldLine) lines[line.oldLine - 1] = line.text;
-      return [file.path, lines];
+      return [file.path, { old: lines }];
     }));
     window.acquireVsCodeApi = () => ({
       getState: () => window.localState,
@@ -53,6 +53,7 @@ async function mount(page, initial = seed) {
         const emit = value => window.postMessage(value, '*');
         if (message.type === 'ready' && message.scope) state.scope = message.scope;
         if (message.type === 'ready' && message.repository) state.repository = message.repository;
+        if (message.type === 'ready' || message.type === 'ignoreWhitespace') state.ignoreWhitespace = message.ignoreWhitespace ?? true;
         if (message.type === 'scope') { state.scope = message.scope; state.files = initial.scopeFiles?.[message.scope] ?? state.files; }
         if (message.type === 'repository') state.repository = message.root;
         if (message.type === 'comment') {
@@ -78,6 +79,68 @@ async function mount(page, initial = seed) {
   expect(errors).toEqual([]);
   return errors;
 }
+
+test('ignore whitespace defaults on, persists through reloads, and protects drafts', async ({ page }) => {
+  await mount(page);
+  const toggle = page.getByRole('button', { name: 'Ignore whitespace', exact: true });
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  expect(await page.evaluate(() => window.messages.find(message => message.type === 'ready').ignoreWhitespace)).toBe(true);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  expect(await page.evaluate(() => window.messages.filter(message => message.type === 'ignoreWhitespace').at(-1))).toEqual({ type: 'ignoreWhitespace', ignoreWhitespace: false });
+  await page.locator('[data-scope="staged"]').click();
+  await page.getByRole('button', { name: 'Refresh changes' }).click();
+  await page.reload();
+  await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'false');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  expect(await page.evaluate(() => window.messages.find(message => message.type === 'ready').ignoreWhitespace)).toBe(false);
+  await page.getByRole('button', { name: 'Comment on src/review.ts:20', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Write a comment' }).fill('Keep this draft.');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#notice')).toContainText('Save or cancel your draft');
+  await expect(page.getByRole('textbox', { name: 'Write a comment' })).toHaveValue('Keep this draft.');
+  expect(await page.evaluate(() => window.messages.filter(message => message.type === 'ignoreWhitespace'))).toEqual([]);
+});
+
+test('whitespace switching waits for matching state and shows why a review is empty', async ({ page }) => {
+  await mount(page);
+  const toggle = page.getByRole('button', { name: 'Ignore whitespace', exact: true });
+  await page.evaluate(() => { window.heldTypes = ['ignoreWhitespace']; });
+  await toggle.click();
+  await expect(toggle).toBeDisabled();
+  await expect(page.locator('.file-card')).toHaveCount(0);
+  await page.evaluate(() => {
+    window.postMessage({ type: 'state', state: window.reviewState }, '*');
+    window.postMessage({ type: 'busy', busy: false }, '*');
+  });
+  await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'true');
+  await page.evaluate(() => {
+    window.reviewState.ignoreWhitespace = false;
+    window.reviewState.files = [];
+    window.heldTypes = [];
+    window.postMessage({ type: 'state', state: window.reviewState }, '*');
+  });
+  await expect(page.locator('.diff-empty')).toHaveText('No uncommitted changes.');
+  await toggle.click();
+  await expect(page.locator('.diff-empty')).toHaveText('No uncommitted changes with whitespace ignored.');
+});
+
+test('comments on either spelling of ignored context remain anchored', async ({ page }) => {
+  const data = structuredClone(seed);
+  const context = data.files[0].hunks[0].lines[0];
+  context.oldText = context.text;
+  context.text = `  ${context.text}`;
+  data.comments = ['old', 'new'].map(side => ({ ...seed.comments[0], id: side, side, line: 18, code: side === 'old' ? context.oldText : context.text }));
+  await mount(page, data);
+  const card = page.locator('.file-card').first();
+  await expect(card.locator('.inline-comment')).toHaveCount(2);
+  await expect(page.getByText('Line changed or hidden', { exact: true })).toHaveCount(0);
+  for (const side of ['old', 'new']) {
+    await page.locator(`.comment-card[data-comment="${side}"]`).getByRole('button', { name: 'Jump to comment' }).click();
+    await expect(card.locator('.diff-line.context').first()).toHaveClass(/flash/);
+  }
+});
 
 for (const trigger of ['scope button', 'comment jump']) {
   test(`${trigger} immediately clears all views during a scope switch and ignores late state`, async ({ page }) => {

@@ -11,7 +11,7 @@ const scopeDescriptions: Record<Scope, string> = {
 };
 
 export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, commentsOpen, filesOpen, searchCount, hasMatches, queryRef, theme, focused,
-  onScope, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
+  onScope, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onIgnoreWhitespace, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
   review: ReviewState;
   busy: boolean;
   query: string;
@@ -32,6 +32,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
   onRegex: () => void;
   onMatchCase: () => void;
   onWordWrap: () => void;
+  onIgnoreWhitespace: () => void;
   onMatch: (direction: number) => void;
   onRefresh: () => void;
   onCopy: () => void;
@@ -61,6 +62,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
       <Button id="next" title="Next match (Enter)" aria-label="Next match" disabled={!hasMatches} onClick={() => onMatch(1)}>↓</Button>
     </div>
     <Button id="toggle-word-wrap" className="icon-button" title="Toggle word wrap" aria-pressed={wordWrap} onClick={onWordWrap}><WrapText size={16} aria-hidden="true" /></Button>
+    <Button id="ignore-whitespace" title="Ignore whitespace when comparing lines" aria-label="Ignore whitespace" aria-pressed={review.ignoreWhitespace} disabled={busy} onClick={onIgnoreWhitespace}>Ignore whitespace</Button>
     <Button id="refresh" title="Refresh changes" disabled={busy} onClick={onRefresh}>↻</Button>
     <Button id="copy" className="primary" disabled={busy || !review.comments.length} onClick={onCopy}>Copy comments</Button>
     <Button id="toggle-comments" className="comments-toggle" aria-expanded={commentsOpen} onClick={onComments}>Comments <span id="comment-count" className="count">{review.comments.length}</span></Button>

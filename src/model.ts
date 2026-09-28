@@ -7,6 +7,8 @@ export type Side = 'old' | 'new';
 export interface DiffLine {
   kind: 'context' | 'add' | 'delete' | 'note';
   text: string;
+  // Ignored whitespace can give a context row different text on each side.
+  oldText?: string;
   oldLine?: number;
   newLine?: number;
 }
@@ -53,6 +55,7 @@ export interface ReviewState {
   branch: string;
   scope: Scope;
   files: ReviewFile[];
+  ignoreWhitespace: boolean;
   comments: ReviewComment[];
   error?: string;
 }
@@ -77,5 +80,6 @@ export function formatComments(comments: ReviewComment[]): string {
 }
 
 export function findAnchor(file: ReviewFile | undefined, side: Side, line: number): DiffLine | undefined {
-  return file?.hunks.flatMap(hunk => hunk.lines).find(row => (side === 'old' ? row.oldLine : row.newLine) === line);
+  const row = file?.hunks.flatMap(hunk => hunk.lines).find(row => (side === 'old' ? row.oldLine : row.newLine) === line);
+  return row && side === 'old' && row.oldText !== undefined ? { ...row, text: row.oldText } : row;
 }

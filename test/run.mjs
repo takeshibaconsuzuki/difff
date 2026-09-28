@@ -29,6 +29,7 @@ try {
   await git.addConfig('core.autocrlf', 'false');
   await git.addConfig('commit.gpgsign', 'false');
   await writeFile(path.join(directory, 'review.txt'), 'committed contents\n');
+  await writeFile(path.join(directory, 'spacing.txt'), 'const answer = 42;\n');
   await writeFile(path.join(directory, 'deleted.txt'), 'deleted contents\n');
   await writeFile(path.join(directory, 'original.txt'), 'one\ntwo\nthree\nfour\nfive\n');
   await writeFile(path.join(directory, 'unstaged-original.txt'), 'untracked one\nuntracked two\nuntracked three\nuntracked four\n');
@@ -44,6 +45,9 @@ try {
   await git.commit('current', ['-a']);
   await git.raw(['merge', 'incoming']).catch(error => { if (!error.message.includes('CONFLICT')) throw error; });
   await writeFile(path.join(directory, 'review.txt'), 'staged contents\n');
+  await writeFile(path.join(directory, 'spacing.txt'), '  const answer=42;  \n');
+  await git.add('spacing.txt');
+  await writeFile(path.join(directory, 'spacing.txt'), '\tconst answer =42;\n');
   await git.add('review.txt');
   await writeFile(path.join(directory, 'review.txt'), 'working contents\n');
   await git.rm('deleted.txt');

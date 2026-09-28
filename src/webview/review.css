@@ -84,7 +84,7 @@ h2, p { margin: 0; }
 .search:focus-within { border-color: var(--focus); }
 .search button { padding: 3px 5px; min-width: 24px; height: 25px; }
 .search-option { font: 12px monospace; }
-.search-option[aria-pressed=true], #toggle-word-wrap[aria-pressed=true] { background: color-mix(in srgb, var(--accent) 20%, transparent); border-color: var(--focus); }
+.search-option[aria-pressed=true], #toggle-word-wrap[aria-pressed=true], #ignore-whitespace[aria-pressed=true] { background: color-mix(in srgb, var(--accent) 20%, transparent); border-color: var(--focus); }
 #search-count { color: var(--muted); font-size: 10px; white-space: nowrap; margin: 0 3px; }
 #search-error:empty { display: none; }
 #search-error { color: var(--red); padding: 7px 26px; font-size: 12px; border-bottom: 1px solid var(--line); }

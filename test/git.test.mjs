@@ -11,7 +11,7 @@ await build({ entryPoints: ['src/git.ts', 'src/git-renames.ts', 'src/model.ts', 
 const require = createRequire(import.meta.url);
 const { GitReview } = require('../.tools/tests/git.js');
 const { withUntrackedComparison } = require('../.tools/tests/git-renames.js');
-const { formatComments } = require('../.tools/tests/model.js');
+const { findAnchor, formatComments } = require('../.tools/tests/model.js');
 const { messageSchema } = require('../.tools/tests/validation.js');
 const temporary = [];
 after(async () => { for (const directory of temporary) await rm(directory, { recursive: true, force: true }); });
@@ -617,7 +617,7 @@ for (const normalization of ['autocrlf', 'attributes', 'clean filter']) {
   });
 }
 
-test('recreated files preserve line-ending changes when attributes disable normalization', async () => {
+test('recreated files preserve line-ending changes when whitespace is included and attributes disable normalization', async () => {
   const { directory, git, review } = await repository();
   await git.addConfig('core.autocrlf', 'true');
   await writeFile(path.join(directory, '.gitattributes'), '*.txt -text\n');
@@ -626,7 +626,8 @@ test('recreated files preserve line-ending changes when attributes disable norma
   await git.commit('initial');
   await git.raw(['rm', '--cached', 'literal.txt']);
   await writeFile(path.join(directory, 'literal.txt'), 'alpha\r\nbeta\r\n');
-  const [file] = await review.files('uncommitted');
+  assert.deepEqual(await review.files('uncommitted'), []);
+  const [file] = await new GitReview(directory, false).files('uncommitted');
   assert.equal(file.additions, 2);
   assert.equal(file.deletions, 2);
 });
@@ -863,6 +864,115 @@ test('unmerged status survives duplicate modified entries until the resolution i
   const [staged] = await review.files('staged');
   assert.equal(staged.status, 'M');
   assert.equal(staged.notice, undefined);
+});
+
+test('whitespace is ignored by default in every scope and can be included again', async () => {
+  const { directory, git, review } = await repository();
+  const original = 'const answer = 42;\n\treturn answer;\n';
+  await writeFile(path.join(directory, 'spacing.txt'), original);
+  await git.add('.');
+  await git.commit('initial');
+  await writeFile(path.join(directory, 'spacing.txt'), '  const answer=42;  \n return\tanswer;\n');
+  await git.add('.');
+  await writeFile(path.join(directory, 'spacing.txt'), '\tconstanswer = 42;\r\nreturnanswer; \r\n');
+  const includeWhitespace = new GitReview(directory, false);
+  for (const scope of ['uncommitted', 'staged', 'unstaged']) {
+    assert.deepEqual(await review.files(scope), [], scope);
+    const [file] = await includeWhitespace.files(scope);
+    assert.equal(file.path, 'spacing.txt', scope);
+    assert.equal(file.additions, 2, scope);
+    assert.equal(file.deletions, 2, scope);
+  }
+  await git.raw(['rm', '--cached', '-f', 'spacing.txt']);
+  assert.deepEqual(await review.files('uncommitted'), [], 'Recreated files use the same whitespace setting');
+  assert.equal((await includeWhitespace.files('uncommitted'))[0].additions, 2);
+});
+
+test('ignored whitespace preserves current context, both comment anchors, and line numbers through expansion', async () => {
+  const { directory, git, review } = await repository();
+  const filename = 'context.txt';
+  const original = Array.from({ length: 70 }, (_, index) => `line ${index + 1}`);
+  await writeFile(path.join(directory, filename), original.join('\n') + '\n');
+  await git.add('.');
+  await git.commit('initial');
+  const changed = original.map(line => `\t${line.replace(' ', '')}  `);
+  changed.splice(19, 1, '  changed value  ', 'inserted line');
+  changed.splice(50, 1);
+  await writeFile(path.join(directory, filename), changed.join('\n') + '\n');
+  for (const scope of ['unstaged', 'uncommitted', 'staged']) {
+    if (scope === 'staged') await git.add('.');
+    const [file] = await review.files(scope);
+    assert.equal(file.notice, undefined, scope);
+    assert.equal(file.additions, 2);
+    assert.equal(file.deletions, 2);
+    assert.equal(findAnchor(file, 'new', 18).text, changed[17]);
+    assert.equal(findAnchor(file, 'old', 18).text, original[17]);
+    assert.ok(file.gaps.length > 0);
+    const revealed = review.reveal(file, 'new', 40);
+    assert.equal(findAnchor(revealed, 'new', 40).text, changed[39]);
+    assert.equal(findAnchor(revealed, 'old', 39).text, original[38]);
+    const expanded = review.expandAll(review.expand(file, file.gaps[0].id, 'up'));
+    assert.deepEqual(expanded.gaps, []);
+    const lines = expanded.hunks.flatMap(hunk => hunk.lines);
+    assert.deepEqual(lines.filter(line => line.oldLine).map(line => findAnchor(expanded, 'old', line.oldLine).text), original);
+    assert.deepEqual(lines.filter(line => line.newLine).map(line => line.text), changed);
+    assert.deepEqual(lines.filter(line => line.newLine).map(line => line.newLine), changed.map((_, index) => index + 1));
+  }
+});
+
+test('ignored whitespace keeps context expandable without a trailing newline', async () => {
+  const { directory, git, review } = await repository();
+  const original = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join('\n');
+  await writeFile(path.join(directory, 'no-newline.txt'), original);
+  await git.add('.');
+  await git.commit('initial');
+  const changed = original.replace('line 10', 'changed line').replace('line 40', '  line40  ');
+  await writeFile(path.join(directory, 'no-newline.txt'), changed);
+  for (const scope of ['unstaged', 'uncommitted', 'staged']) {
+    if (scope === 'staged') await git.add('.');
+    const [file] = await review.files(scope);
+    assert.equal(file.notice, undefined, scope);
+    assert.ok(file.gaps.length > 0, scope);
+    assert.equal(file.additions, 1);
+    assert.equal(file.deletions, 1);
+    const revealed = review.reveal(file, 'new', 40);
+    assert.equal(findAnchor(revealed, 'new', 40).text, '  line40  ');
+    assert.equal(findAnchor(revealed, 'old', 40).text, 'line 40');
+    const expanded = review.expandAll(file);
+    assert.deepEqual(expanded.gaps, []);
+    assert.deepEqual(expanded.hunks.flatMap(hunk => hunk.lines).filter(line => line.newLine).map(line => line.text), changed.split('\n'));
+  }
+});
+
+test('ignoring whitespace keeps blank-line insertions, new files, deletions, renames, and mode changes', async () => {
+  const { directory, git, review } = await repository();
+  const original = Array.from({ length: 30 }, (_, index) => `line ${index + 1}\n`).join('');
+  await writeFile(path.join(directory, 'old.txt'), original);
+  await writeFile(path.join(directory, 'deleted.txt'), ' \t\n');
+  await writeFile(path.join(directory, 'blank.txt'), 'before\nafter\n');
+  await writeFile(path.join(directory, 'mode.txt'), 'same text\n');
+  await git.add('.');
+  await git.raw(['update-index', '--chmod=-x', 'mode.txt']);
+  await git.commit('initial');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  await writeFile(path.join(directory, 'new.txt'), original.replace('line 15', '  line15  '));
+  await writeFile(path.join(directory, 'blank.txt'), 'before\n  \nafter\n');
+  await writeFile(path.join(directory, 'mode.txt'), 'same\ttext  \n');
+  await writeFile(path.join(directory, 'added.txt'), '\t\n');
+  await git.rm('deleted.txt');
+  const renamed = (await review.files('uncommitted')).find(file => file.path === 'new.txt');
+  assert.equal(renamed.originalPath, 'old.txt');
+  assert.equal(renamed.path, 'new.txt');
+  assert.deepEqual(renamed.hunks, []);
+  assert.match(renamed.notice, /renamed/);
+  await git.add('.');
+  await git.raw(['update-index', '--chmod=+x', 'mode.txt']);
+  const files = await review.files('staged');
+  assert.equal(files.find(file => file.path === 'added.txt').additions, 1);
+  assert.equal(files.find(file => file.path === 'deleted.txt').deletions, 1);
+  assert.equal(files.find(file => file.path === 'blank.txt').additions, 1);
+  assert.deepEqual(files.find(file => file.path === 'new.txt').hunks, []);
+  assert.match(files.find(file => file.path === 'mode.txt').notice, /metadata/);
 });
 
 test('comment export is location-aware and inbound comment messages are validated', () => {

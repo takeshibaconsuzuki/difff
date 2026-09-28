@@ -22,7 +22,7 @@ class ReviewPanel implements vscode.Disposable {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private comments: ReviewComment[];
-  private state: ReviewState = { repositories: [], repository: '', branch: '', scope: 'uncommitted', files: [], comments: [] };
+  private state: ReviewState = { repositories: [], repository: '', branch: '', scope: 'uncommitted', ignoreWhitespace: true, files: [], comments: [] };
   private gitReview?: GitReview;
   private queue = Promise.resolve();
   private closed = false;
@@ -102,7 +102,7 @@ class ReviewPanel implements vscode.Disposable {
       this.state.error = 'Open a folder containing a Git repository, then refresh to start a review.';
     } else {
       try {
-        const git = new GitReview(this.state.repository);
+        const git = new GitReview(this.state.repository, this.state.ignoreWhitespace);
         this.gitReview = git;
         [this.state.files, this.state.branch] = await Promise.all([git.files(this.state.scope), git.branch()]);
       } catch (error) {
@@ -120,13 +120,18 @@ class ReviewPanel implements vscode.Disposable {
   }
 
   private async handle(message: ClientMessage): Promise<void> {
-    const git = () => this.gitReview ?? new GitReview(this.state.repository);
+    const git = () => this.gitReview ?? new GitReview(this.state.repository, this.state.ignoreWhitespace);
     const comment = 'id' in message ? this.comments.find(item => item.id === message.id && item.repository === this.state.repository) : undefined;
     switch (message.type) {
       case 'ready':
         this.state.scope = message.scope ?? 'uncommitted';
         this.state.repository = message.repository ?? '';
+        this.state.ignoreWhitespace = message.ignoreWhitespace ?? true;
         await this.refresh(true);
+        break;
+      case 'ignoreWhitespace':
+        this.state.ignoreWhitespace = message.ignoreWhitespace;
+        await this.refresh();
         break;
       case 'refresh': await this.refresh(true); break;
       case 'scope':

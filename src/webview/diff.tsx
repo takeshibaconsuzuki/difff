@@ -90,10 +90,10 @@ export const DiffFile = memo(function DiffFile({ file, comments, draft, busy, sa
           const lineMatches = matches.get(id);
           const current = lineMatches?.some(match => match.index === activeMatch);
           const lineComments = [
-            ...(commentsByLine.get(JSON.stringify(['old', line.oldLine, line.text])) ?? []),
+            ...(commentsByLine.get(JSON.stringify(['old', line.oldLine, line.oldText ?? line.text])) ?? []),
             ...(commentsByLine.get(JSON.stringify(['new', line.newLine, line.text])) ?? []),
           ];
-          const hasDraft = draft && (draft.side === 'old' ? line.oldLine : line.newLine) === draft.line && draft.code === line.text;
+          const hasDraft = draft && (draft.side === 'old' ? line.oldLine : line.newLine) === draft.line && draft.code === (draft.side === 'old' ? line.oldText ?? line.text : line.text);
           return <Fragment key={id}>
             <div className={`diff-line ${line.kind}${current ? ' current-match' : ''}${flashRow === id ? ` ${pulseClass(pulseSequence)}` : ''}`} data-row={id}>
               <Button title={`Comment on ${file.path}:${line.newLine ?? line.oldLine ?? 1}`} className="add-comment" disabled={saving} onClick={() => startDraft(file.path, line, line.newLine ? 'new' : 'old')}>+</Button>

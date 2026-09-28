@@ -6,7 +6,7 @@ interface UIState {
   review: ReviewState;
   busy: boolean;
   saving: boolean;
-  loadingReview?: Pick<ReviewState, 'repository' | 'scope'>;
+  loadingReview?: Pick<ReviewState, 'repository' | 'scope' | 'ignoreWhitespace'>;
   draft?: Draft;
   activePath: string;
   filesOpen: boolean;
@@ -33,6 +33,7 @@ type Action =
   | { type: 'startSaving' }
   | { type: 'repository'; root: string }
   | { type: 'scope'; scope: ReviewState['scope'] }
+  | { type: 'ignoreWhitespace'; ignoreWhitespace: boolean }
   | { type: 'draftBody'; body: string }
   | { type: 'cancelDraft' }
   | { type: 'deleteDraft'; id: string }
@@ -48,7 +49,7 @@ type Action =
   | { type: 'toggleTheme' };
 
 const initialState: UIState = {
-  review: { repositories: [], repository: initialLocalState.draft?.repository ?? initialLocalState.repository ?? '', branch: '', scope: initialLocalState.draft?.scope ?? initialLocalState.scope ?? 'uncommitted', files: [], comments: [] },
+  review: { repositories: [], repository: initialLocalState.draft?.repository ?? initialLocalState.repository ?? '', branch: '', scope: initialLocalState.draft?.scope ?? initialLocalState.scope ?? 'uncommitted', ignoreWhitespace: initialLocalState.ignoreWhitespace ?? true, files: [], comments: [] },
   busy: true,
   saving: false,
   draft: initialLocalState.draft,
@@ -74,7 +75,7 @@ function reducer(state: UIState, action: Action): UIState {
       const message = action.message;
       switch (message.type) {
         case 'state':
-          if (state.loadingReview && (message.state.repository !== state.loadingReview.repository || message.state.scope !== state.loadingReview.scope)) return state;
+          if (state.loadingReview && (message.state.repository !== state.loadingReview.repository || message.state.scope !== state.loadingReview.scope || message.state.ignoreWhitespace !== state.loadingReview.ignoreWhitespace)) return state;
           return { ...state, review: message.state, loadingReview: undefined, activePath: message.state.files.some(file => file.path === state.activePath) ? state.activePath : message.state.files[0]?.path ?? '' };
         case 'busy': return { ...state, busy: message.busy };
         case 'notice': return { ...state, notice: message };
@@ -104,11 +105,13 @@ function reducer(state: UIState, action: Action): UIState {
     case 'clearDraftWarning': return { ...state, draftWarning: undefined };
     case 'requireDraft': return requireDraft(state, action.text);
     case 'repository':
+    case 'ignoreWhitespace':
     case 'scope': {
       if (state.draft || state.saving || state.loadingReview) return state;
       const repository = action.type === 'repository' ? action.root : state.review.repository;
       const scope = action.type === 'scope' ? action.scope : state.review.scope;
-      return { ...state, busy: true, loadingReview: { repository, scope }, review: { ...state.review, repository, scope, branch: '', files: [], comments: [], error: undefined }, activePath: '', reveal: undefined, draftWarning: undefined, notice: undefined };
+      const ignoreWhitespace = action.type === 'ignoreWhitespace' ? action.ignoreWhitespace : state.review.ignoreWhitespace;
+      return { ...state, busy: true, loadingReview: { repository, scope, ignoreWhitespace }, review: { ...state.review, repository, scope, ignoreWhitespace, branch: '', files: [], comments: [], error: undefined }, activePath: '', reveal: undefined, draftWarning: undefined, notice: undefined };
     }
     case 'startSaving': return state.draft ? { ...state, saving: true } : state;
     case 'beginDraft': return state.saving || state.loadingReview ? state : state.draft ? requireDraft(state, 'Save or cancel your current draft first.') : { ...state, draft: action.draft };
@@ -134,12 +137,12 @@ export function useReview() {
   useEffect(() => {
     const onMessage = (event: MessageEvent<HostMessage>) => { dispatch({ type: 'host', message: event.data }); };
     window.addEventListener('message', onMessage);
-    post({ type: 'ready', scope: initialState.review.scope, repository: initialState.review.repository });
+    post({ type: 'ready', scope: initialState.review.scope, repository: initialState.review.repository, ignoreWhitespace: initialState.review.ignoreWhitespace });
     return () => { window.removeEventListener('message', onMessage); };
   }, []);
 
-  const { draft, query, regex, matchCase, wordWrap, theme, review: { scope, repository }, notice, reveal, draftWarning } = state;
-  useEffect(() => { persist({ draft, query, regex, matchCase, wordWrap, theme, scope, repository }); }, [draft, query, regex, matchCase, wordWrap, theme, scope, repository]);
+  const { draft, query, regex, matchCase, wordWrap, theme, review: { scope, repository, ignoreWhitespace }, notice, reveal, draftWarning } = state;
+  useEffect(() => { persist({ draft, query, regex, matchCase, wordWrap, theme, scope, repository, ignoreWhitespace }); }, [draft, query, regex, matchCase, wordWrap, theme, scope, repository, ignoreWhitespace]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => { dispatch({ type: 'clearNotice' }); }, notice.error ? 9000 : 3500);

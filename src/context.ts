@@ -1,5 +1,17 @@
 import type { ContextGap, DiffLine, Hunk, ReviewFile, Side } from './model';
 
+export interface ContextSource {
+  old: string[];
+  new?: string[];
+}
+
+function contextLines(source: ContextSource, oldStart: number, newStart: number, count: number): DiffLine[] {
+  return source.old.slice(oldStart - 1, oldStart - 1 + count).map((oldText, index) => {
+    const text = source.new?.[newStart - 1 + index] ?? oldText;
+    return { kind: 'context', text, ...(oldText !== text ? { oldText } : {}), oldLine: oldStart + index, newLine: newStart + index };
+  });
+}
+
 // The diff library already normalizes empty ranges to their insertion point.
 const start = (hunk: Hunk, side: Side): number => side === 'old' ? hunk.oldStart : hunk.newStart;
 
@@ -41,18 +53,18 @@ function merge(hunks: Hunk[]): Hunk[] {
   return merged;
 }
 
-function revealRange(file: ReviewFile, source: string[], gap: ContextGap, offset: number, count: number): ReviewFile {
+function revealRange(file: ReviewFile, source: ContextSource, gap: ContextGap, offset: number, count: number): ReviewFile {
   const oldStart = gap.oldStart + offset;
   const newStart = gap.newStart + offset;
-  const lines: DiffLine[] = source.slice(oldStart - 1, oldStart - 1 + count).map((text, index) => ({ kind: 'context', text, oldLine: oldStart + index, newLine: newStart + index }));
+  const lines = contextLines(source, oldStart, newStart, count);
   if (!lines.length) return file;
   const hunks = [...file.hunks];
   hunks.splice(gap.before, 0, header({ header: '', oldStart, newStart, oldLines: lines.length, newLines: lines.length, lines }));
   const joined = merge(hunks);
-  return { ...file, hunks: joined, gaps: contextGaps(joined, source.length) };
+  return { ...file, hunks: joined, gaps: contextGaps(joined, source.old.length) };
 }
 
-export function expandContext(file: ReviewFile, source: string[], gapId: string, direction: 'up' | 'down', amount = 20): ReviewFile {
+export function expandContext(file: ReviewFile, source: ContextSource, gapId: string, direction: 'up' | 'down', amount = 20): ReviewFile {
   const gap = file.gaps.find(gap => gap.id === gapId);
   if (!gap) return file;
   if (direction === 'up' && gap.before === file.hunks.length || direction === 'down' && gap.before === 0) return file;
@@ -60,23 +72,23 @@ export function expandContext(file: ReviewFile, source: string[], gapId: string,
   return revealRange(file, source, gap, direction === 'up' ? gap.count - count : 0, count);
 }
 
-export function expandAllContext(file: ReviewFile, source: string[]): ReviewFile {
+export function expandAllContext(file: ReviewFile, source: ContextSource): ReviewFile {
   const hunks: Hunk[] = [];
   const gaps = new Map(file.gaps.map(gap => [gap.before, gap]));
   for (let before = 0; before <= file.hunks.length; before++) {
     const gap = gaps.get(before);
     if (gap) {
-      const lines: DiffLine[] = source.slice(gap.oldStart - 1, gap.oldStart - 1 + gap.count).map((text, index) => ({ kind: 'context', text, oldLine: gap.oldStart + index, newLine: gap.newStart + index }));
+      const lines = contextLines(source, gap.oldStart, gap.newStart, gap.count);
       if (lines.length) hunks.push(header({ header: '', oldStart: gap.oldStart, newStart: gap.newStart, oldLines: lines.length, newLines: lines.length, lines }));
     }
     const hunk = file.hunks[before];
     if (hunk) hunks.push(hunk);
   }
   const joined = merge(hunks);
-  return { ...file, hunks: joined, gaps: contextGaps(joined, source.length) };
+  return { ...file, hunks: joined, gaps: contextGaps(joined, source.old.length) };
 }
 
-export function revealContextLine(file: ReviewFile, source: string[], side: Side, line: number): ReviewFile {
+export function revealContextLine(file: ReviewFile, source: ContextSource, side: Side, line: number): ReviewFile {
   const gap = file.gaps.find(gap => line >= (side === 'old' ? gap.oldStart : gap.newStart) && line < (side === 'old' ? gap.oldStart : gap.newStart) + gap.count);
   if (!gap) return file;
   const offset = Math.max(0, line - (side === 'old' ? gap.oldStart : gap.newStart) - 3);
