@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { simpleGit } from 'simple-git';
 
-await build({ entryPoints: ['src/git.ts', 'src/model.ts', 'src/validation.ts'], outdir: '.tools/tests', bundle: true, platform: 'node', format: 'cjs', logLevel: 'silent' });
+await build({ entryPoints: ['src/git.ts', 'src/git-renames.ts', 'src/model.ts', 'src/validation.ts'], outdir: '.tools/tests', bundle: true, platform: 'node', format: 'cjs', logLevel: 'silent' });
 const require = createRequire(import.meta.url);
 const { GitReview } = require('../.tools/tests/git.js');
+const { withUntrackedComparison } = require('../.tools/tests/git-renames.js');
 const { formatComments } = require('../.tools/tests/model.js');
 const { messageSchema } = require('../.tools/tests/validation.js');
 const temporary = [];
@@ -205,7 +206,338 @@ test('net-zero changes are omitted, renames remain reviewable, and ignored files
   const all = await review.files('uncommitted');
   assert.equal(all.some(file => file.path === 'a.txt'), false);
   assert.equal(all.some(file => file.path === 'ignored.secret'), false);
-  assert.deepEqual(all.map(file => file.status).sort(), ['A', 'D']);
+  assert.equal(all.length, 1);
+  assert.equal(all[0].path, 'renamed.txt');
+  assert.equal(all[0].originalPath, 'rename.txt');
+  assert.equal(all[0].status, 'R');
+  assert.equal(all[0].additions, 0);
+  assert.equal(all[0].deletions, 0);
+  assert.deepEqual(all[0].hunks, []);
+  assert.equal(all[0].notice, 'File renamed without text changes.');
+  const [staged] = (await review.files('staged')).filter(file => file.status === 'R');
+  assert.equal(staged.originalPath, 'rename.txt');
+  assert.equal(staged.path, 'renamed.txt');
+  assert.equal(staged.notice, all[0].notice);
+});
+
+test('renames preserve both literal paths, scope contents, and expandable source context', async () => {
+  const { directory, git, review } = await repository();
+  const originalPath = 'src/original [v1] ü.ts';
+  const destination = 'renamed [v2] 日本.ts';
+  const original = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  await mkdir(path.join(directory, 'src'));
+  await writeFile(path.join(directory, originalPath), original);
+  await writeFile(path.join(directory, 'deleted.txt'), 'remove me\n');
+  await writeFile(path.join(directory, 'modified.txt'), 'before\n');
+  await git.add('.');
+  await git.commit('initial');
+  await git.addConfig('diff.renames', 'false');
+  await git.addConfig('diff.noprefix', 'true');
+  await git.mv(originalPath, destination);
+  const staged = original.replace('line 20\n', 'staged change\n');
+  await writeFile(path.join(directory, destination), staged);
+  await writeFile(path.join(directory, 'added.txt'), 'new file\n');
+  await writeFile(path.join(directory, 'modified.txt'), 'after\n');
+  await git.rm('deleted.txt');
+  await git.add('.');
+  await writeFile(path.join(directory, destination), staged.replace('line 60\n', 'unstaged change\n'));
+
+  for (const scope of ['staged', 'uncommitted', 'unstaged']) {
+    const files = await review.files(scope);
+    const file = files.find(file => file.path === destination);
+    assert.ok(file, scope);
+    assert.equal(file.status, scope === 'unstaged' ? 'M' : 'R');
+    assert.equal(file.originalPath, scope === 'unstaged' ? undefined : originalPath);
+    assert.equal(file.notice, undefined, scope);
+    const additions = file.hunks.flatMap(hunk => hunk.lines).filter(line => line.kind === 'add');
+    assert.deepEqual(additions.map(line => line.text), scope === 'staged' ? ['staged change'] : scope === 'unstaged' ? ['unstaged change'] : ['staged change', 'unstaged change']);
+    assert.equal(file.additions, additions.length);
+    assert.equal(file.deletions, additions.length);
+    const expanded = review.expandAll(file);
+    assert.deepEqual(expanded.gaps, []);
+    assert.equal(expanded.hunks[0].lines[0].oldLine, 1);
+    assert.equal(expanded.hunks[0].lines.at(-1).newLine, 80);
+    assert.ok(review.reveal(file, 'old', 40).hunks.some(hunk => hunk.lines.some(line => line.oldLine === 40 && line.text === 'line 40')));
+    if (scope !== 'unstaged') {
+      assert.deepEqual(files.filter(file => file.path !== destination).map(file => [file.path, file.status]), [['added.txt', 'A'], ['deleted.txt', 'D'], ['modified.txt', 'M']]);
+    } else assert.equal(files.length, 1);
+  }
+});
+
+test('unstaged renames use the index source with an untracked or intent-to-add destination', async () => {
+  const { directory, git, review } = await repository();
+  const original = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  await writeFile(path.join(directory, 'old.txt'), original);
+  await git.add('.');
+  await git.commit('initial');
+  const indexed = original.replace('line 10\n', 'indexed line\n');
+  await writeFile(path.join(directory, 'old.txt'), indexed);
+  await git.add('old.txt');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  await writeFile(path.join(directory, 'new.txt'), indexed.replace('line 20\n', 'working line\n'));
+  for (const intentToAdd of [false, true]) {
+    if (intentToAdd) await git.raw(['add', '--intent-to-add', '--', 'new.txt']);
+    const index = await readFile(path.join(directory, '.git', 'index'));
+    const stagedPatch = await git.diff(['--cached']);
+    const unstaged = await review.files('unstaged');
+    assert.equal(unstaged.length, 1);
+    const [file] = unstaged;
+    assert.equal(file.status, 'R');
+    assert.equal(file.path, 'new.txt');
+    assert.equal(file.originalPath, 'old.txt');
+    assert.equal(file.notice, undefined);
+    assert.equal(file.additions, 1);
+    assert.equal(file.deletions, 1);
+    assert.ok(review.expandAll(file).hunks[0].lines.some(line => line.kind === 'context' && line.text === 'indexed line'));
+    const [uncommitted] = await review.files('uncommitted');
+    assert.equal(uncommitted.status, 'R');
+    assert.equal(uncommitted.additions, 2);
+    assert.equal(uncommitted.deletions, 2);
+    const [staged] = await review.files('staged');
+    assert.equal(staged.path, 'old.txt');
+    assert.equal(staged.status, 'M');
+    assert.deepEqual(await readFile(path.join(directory, '.git', 'index')), index);
+    assert.equal(await git.diff(['--cached']), stagedPatch);
+  }
+});
+
+test('renaming a file into a directory does not include neighboring patches', async () => {
+  const { directory, git, review } = await repository();
+  await writeFile(path.join(directory, 'old'), 'one\ntwo\nthree\nfour\n');
+  await git.add('.');
+  await git.commit('initial');
+  await rename(path.join(directory, 'old'), path.join(directory, 'temporary'));
+  await mkdir(path.join(directory, 'old'));
+  await rename(path.join(directory, 'temporary'), path.join(directory, 'old', 'new.txt'));
+  await writeFile(path.join(directory, 'old', 'new.txt'), 'one\ntwo\nthree\nchanged\n');
+  await writeFile(path.join(directory, 'old', 'neighbor.txt'), 'unrelated addition\n');
+  for (const scope of ['unstaged', 'uncommitted', 'staged']) {
+    if (scope === 'staged') await git.add('.');
+    const files = await review.files(scope);
+    assert.equal(files.length, 2);
+    const file = files.find(file => file.path === 'old/new.txt');
+    assert.equal(file.originalPath, 'old');
+    assert.equal(file.status, 'R');
+    assert.equal(file.notice, undefined);
+    assert.equal(file.additions, 1);
+    assert.equal(file.deletions, 1);
+    assert.equal(file.hunks.flatMap(hunk => hunk.lines).some(line => line.text === 'unrelated addition'), false);
+  }
+});
+
+test('rename previews retain the detected pairs when identical sources become sibling destinations', async () => {
+  const { directory, git, review } = await repository();
+  const original = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  await writeFile(path.join(directory, 'a'), original);
+  await writeFile(path.join(directory, 'b'), original);
+  await git.add('.');
+  await git.commit('initial');
+  await rename(path.join(directory, 'a'), path.join(directory, 'temporary'));
+  await mkdir(path.join(directory, 'a'));
+  await rename(path.join(directory, 'temporary'), path.join(directory, 'a', 'c'));
+  await rename(path.join(directory, 'b'), path.join(directory, 'a', 'b'));
+  await writeFile(path.join(directory, 'a', 'c'), original.replace('line 15\n', 'edited line\n'));
+
+  for (const destinationState of ['untracked', 'intent-to-add', 'staged']) {
+    if (destinationState === 'intent-to-add') await git.raw(['add', '--intent-to-add', '--', 'a/b', 'a/c']);
+    if (destinationState === 'staged') await git.add('.');
+    // Intent-to-add removes the old file "a" from the index to make room for "a/*".
+    const scopes = destinationState === 'untracked' ? ['unstaged', 'uncommitted'] : destinationState === 'staged' ? ['staged', 'uncommitted'] : ['uncommitted'];
+    for (const scope of scopes) {
+      const files = await review.files(scope);
+      assert.deepEqual(files.map(file => [file.originalPath, file.path, file.status]), [['b', 'a/b', 'R'], ['a', 'a/c', 'R']]);
+      const [unchanged, edited] = files;
+      assert.equal(unchanged.notice, 'File renamed without text changes.');
+      assert.equal(unchanged.additions, 0);
+      assert.equal(unchanged.deletions, 0);
+      assert.equal(edited.notice, undefined, `${destinationState}: ${scope}`);
+      assert.equal(edited.additions, 1);
+      assert.equal(edited.deletions, 1);
+      assert.deepEqual(edited.hunks.flatMap(hunk => hunk.lines).filter(line => line.kind !== 'context'), [
+        { kind: 'delete', text: 'line 15', oldLine: 15 },
+        { kind: 'add', text: 'edited line', newLine: 15 },
+      ]);
+      const expanded = review.expandAll(edited);
+      assert.deepEqual(expanded.gaps, []);
+      assert.equal(expanded.hunks[0].lines[0].oldLine, 1);
+      assert.equal(expanded.hunks[0].lines.at(-1).newLine, 30);
+    }
+  }
+});
+
+test('a failing untracked clean filter leaves the ordinary review available', async () => {
+  const { directory, git, review } = await repository();
+  await writeFile(path.join(directory, '.gitattributes'), '*.data filter=broken\n');
+  await writeFile(path.join(directory, 'fail.cjs'), 'process.exit(1);\n');
+  await writeFile(path.join(directory, 'old.txt'), 'moved contents\n');
+  await writeFile(path.join(directory, 'app.txt'), 'before\n');
+  await git.add('.');
+  await git.commit('initial');
+  await simpleGit({ baseDir: directory, unsafe: { allowUnsafeFilter: true } }).addConfig('filter.broken.clean', 'node fail.cjs');
+  await git.addConfig('filter.broken.required', 'true');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  await writeFile(path.join(directory, 'app.txt'), 'after\n');
+  await writeFile(path.join(directory, 'unrelated.data'), 'new data\n');
+  const index = await readFile(path.join(directory, '.git', 'index'));
+  for (const scope of ['unstaged', 'uncommitted']) {
+    const files = await review.files(scope);
+    assert.deepEqual(files.map(file => [file.path, file.status]), [['app.txt', 'M'], ['new.txt', '?'], ['old.txt', 'D'], ['unrelated.data', '?']]);
+    assert.ok(files.every(file => file.notice === undefined));
+    const app = files.find(file => file.path === 'app.txt');
+    assert.deepEqual(app.hunks.flatMap(hunk => hunk.lines), [
+      { kind: 'delete', text: 'before', oldLine: 1 },
+      { kind: 'add', text: 'after', newLine: 1 },
+    ]);
+    assert.equal(files.find(file => file.path === 'new.txt').additions, 1);
+    assert.equal(files.find(file => file.path === 'old.txt').deletions, 1);
+    assert.equal(files.find(file => file.path === 'unrelated.data').additions, 1);
+  }
+  assert.deepEqual(await readFile(path.join(directory, '.git', 'index')), index);
+  assert.deepEqual(await review.files('staged'), []);
+
+  await rm(path.join(directory, 'unrelated.data'));
+  assert.equal((await review.files('unstaged')).find(file => file.path === 'new.txt').status, 'R', 'Detection recovers on the next refresh');
+});
+
+test('untracked text and binary moves pair once while ignored files and unrelated additions stay separate', async () => {
+  const { directory, git, review } = await repository();
+  await writeFile(path.join(directory, '.gitignore'), '*.ignored\n');
+  await writeFile(path.join(directory, 'old [v1] ü.txt'), 'rename this text\n');
+  await writeFile(path.join(directory, 'old.bin'), Buffer.from([0, 42, 15, 12]));
+  await writeFile(path.join(directory, 'deleted.txt'), 'nothing like the new file\n');
+  await git.add('.');
+  await git.commit('initial');
+  await mkdir(path.join(directory, 'new directory'));
+  await rename(path.join(directory, 'old [v1] ü.txt'), path.join(directory, 'new directory', 'new [v2] 日本.txt'));
+  await rename(path.join(directory, 'old.bin'), path.join(directory, 'new.bin'));
+  await rm(path.join(directory, 'deleted.txt'));
+  await writeFile(path.join(directory, 'new.txt'), 'unrelated addition\n');
+  await writeFile(path.join(directory, 'hidden.ignored'), 'nothing like the new file\n');
+  await writeFile(path.join(directory, '.git', 'hooks', 'post-index-change'), '#!/bin/sh\nprintf invoked > hook-ran\n', { mode: 0o755 });
+  const index = await readFile(path.join(directory, '.git', 'index'));
+  const objects = (await readdir(path.join(directory, '.git', 'objects'), { recursive: true })).sort();
+  const status = await git.raw(['--no-optional-locks', 'status', '--porcelain=v1', '-z']);
+  for (const scope of ['unstaged', 'uncommitted']) {
+    const files = await review.files(scope);
+    assert.equal(files.length, 4);
+    const moved = files.filter(file => file.status === 'R');
+    assert.deepEqual(moved.map(file => [file.originalPath, file.path]), [['old [v1] ü.txt', 'new directory/new [v2] 日本.txt'], ['old.bin', 'new.bin']]);
+    for (const file of moved) {
+      assert.equal(file.notice, 'File renamed without text changes.');
+      assert.equal(file.additions, 0);
+      assert.equal(file.deletions, 0);
+      assert.deepEqual(file.hunks, []);
+    }
+    assert.equal(files.find(file => file.path === 'deleted.txt').status, 'D');
+    assert.equal(files.find(file => file.path === 'new.txt').status, '?');
+  }
+  assert.deepEqual(await review.files('staged'), []);
+  assert.deepEqual(await readFile(path.join(directory, '.git', 'index')), index);
+  assert.deepEqual((await readdir(path.join(directory, '.git', 'objects'), { recursive: true })).sort(), objects);
+  assert.equal(await git.raw(['--no-optional-locks', 'status', '--porcelain=v1', '-z']), status);
+  await assert.rejects(lstat(path.join(directory, 'hook-ran')), { code: 'ENOENT' });
+});
+
+test('a staged deletion and untracked destination are a rename only in uncommitted scope', async () => {
+  const { directory, git, review } = await repository();
+  await writeFile(path.join(directory, 'old.txt'), 'moved contents\n');
+  await git.add('.');
+  await git.commit('initial');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  await git.raw(['rm', '--cached', '--', 'old.txt']);
+  assert.deepEqual((await review.files('uncommitted')).map(file => [file.path, file.originalPath, file.status]), [['new.txt', 'old.txt', 'R']]);
+  assert.deepEqual((await review.files('staged')).map(file => [file.path, file.status]), [['old.txt', 'D']]);
+  assert.deepEqual((await review.files('unstaged')).map(file => [file.path, file.status]), [['new.txt', '?']]);
+});
+
+test('untracked rename detection and previews honor Git text normalization', async () => {
+  const { directory, git, review } = await repository();
+  await writeFile(path.join(directory, '.gitattributes'), '*.txt text eol=crlf\n');
+  await writeFile(path.join(directory, 'old.txt'), 'one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n');
+  await git.add('.');
+  await git.commit('initial');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  await writeFile(path.join(directory, 'new.txt'), 'one\r\ntwo\r\nthree\r\nfour\r\nchanged\r\n');
+  const [file] = await review.files('unstaged');
+  assert.equal(file.status, 'R');
+  assert.equal(file.originalPath, 'old.txt');
+  assert.equal(file.path, 'new.txt');
+  assert.equal(file.notice, undefined);
+  assert.equal(file.additions, 1);
+  assert.equal(file.deletions, 1);
+  assert.deepEqual(file.hunks.flatMap(hunk => hunk.lines).filter(line => line.kind !== 'context'), [
+    { kind: 'delete', text: 'five', oldLine: 5 },
+    { kind: 'add', text: 'changed', newLine: 5 },
+  ]);
+});
+
+test('untracked moves work in linked worktrees with split indexes without changing repository storage', async () => {
+  const { directory, git } = await repository();
+  await writeFile(path.join(directory, 'old.txt'), 'moved contents\n');
+  await git.add('.');
+  await git.commit('initial');
+  const worktree = await mkdtemp(path.join(tmpdir(), 'difff-test-worktree-'));
+  temporary.push(worktree);
+  await git.raw(['worktree', 'add', '--detach', worktree]);
+  const linked = simpleGit(worktree);
+  await linked.raw(['update-index', '--split-index']);
+  await rename(path.join(worktree, 'old.txt'), path.join(worktree, 'new.txt'));
+  const indexPath = (await linked.raw(['rev-parse', '--path-format=absolute', '--git-path', 'index'])).trim();
+  const index = await readFile(indexPath);
+  const storage = (await readdir(path.join(directory, '.git'), { recursive: true })).sort();
+  const review = new GitReview(worktree);
+  for (const scope of ['unstaged', 'uncommitted']) {
+    assert.deepEqual((await review.files(scope)).map(file => [file.path, file.originalPath, file.status]), [['new.txt', 'old.txt', 'R']]);
+  }
+  assert.deepEqual(await readFile(indexPath), index);
+  assert.deepEqual((await readdir(path.join(directory, '.git'), { recursive: true })).sort(), storage);
+});
+
+test('rename comparison removes its temporary index and objects even if review fails', async () => {
+  const { directory, git } = await repository();
+  await writeFile(path.join(directory, 'old.txt'), 'moved contents\n');
+  await git.add('.');
+  await git.commit('initial');
+  await rename(path.join(directory, 'old.txt'), path.join(directory, 'new.txt'));
+  const index = await readFile(path.join(directory, '.git', 'index'));
+  let comparisonDirectory;
+  await assert.rejects(withUntrackedComparison(git, directory, [], new Set(['old.txt']), ['new.txt'], async comparison => {
+    comparisonDirectory = path.dirname((await comparison.raw(['rev-parse', '--git-path', 'index'])).trim());
+    throw new Error('Review interrupted');
+  }), /Review interrupted/);
+  assert.ok(comparisonDirectory);
+  await assert.rejects(lstat(comparisonDirectory), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(path.join(directory, '.git', 'index')), index);
+});
+
+test('binary renames remain one file, with no invented text or context', async () => {
+  const { directory, git, review } = await repository();
+  const contents = Buffer.alloc(8192, 42);
+  contents[0] = 0;
+  await writeFile(path.join(directory, 'old.bin'), contents);
+  await git.add('.');
+  await git.commit('initial');
+  await git.mv('old.bin', 'new.bin');
+  for (const changed of [false, true]) {
+    if (changed) {
+      contents[100] = 10;
+      await writeFile(path.join(directory, 'new.bin'), contents);
+      await git.add('.');
+    }
+    for (const scope of ['staged', 'uncommitted']) {
+      const files = await review.files(scope);
+      assert.equal(files.length, 1);
+      const [file] = files;
+      assert.equal(file.status, 'R');
+      assert.equal(file.path, 'new.bin');
+      assert.equal(file.originalPath, 'old.bin');
+      assert.match(file.notice, changed ? /Binary/ : /renamed/);
+      assert.deepEqual(file.hunks, []);
+      assert.deepEqual(file.gaps, []);
+      assert.equal(file.additions, 0);
+      assert.equal(file.deletions, 0);
+    }
+  }
 });
 
 test('recreated staged deletions compare the working file with HEAD in uncommitted scope', async () => {
@@ -385,6 +717,60 @@ test('submodule previews use commit pointers regardless of configured diff forma
       ]);
     }
     await git.raw(['reset', 'HEAD', '--', 'lib']);
+  }
+  await submodule.raw(['checkout', previous]);
+  await rename(subdirectory, path.join(directory, 'moved-lib'));
+  await writeFile(path.join(directory, '.gitmodules'), '[submodule "lib"]\n\tpath = moved-lib\n\turl = ./lib\n');
+  await git.add('.');
+  for (const scope of ['uncommitted', 'staged']) {
+    const file = (await review.files(scope)).find(file => file.path === 'moved-lib');
+    assert.equal(file.status, 'R');
+    assert.equal(file.originalPath, 'lib');
+    assert.equal(file.notice, 'File renamed without text changes.');
+    assert.deepEqual(file.gaps, []);
+    assert.deepEqual(file.hunks, []);
+  }
+});
+
+test('renamed submodule previews keep their own size limit alongside large unrelated patches', async () => {
+  const { directory, git, review } = await repository();
+  const subdirectory = path.join(directory, 'lib');
+  await mkdir(subdirectory);
+  const submodule = simpleGit(subdirectory);
+  await submodule.init();
+  await submodule.addConfig('user.name', 'Diff Test');
+  await submodule.addConfig('user.email', 'diff@example.test');
+  await submodule.addConfig('core.autocrlf', 'false');
+  await writeFile(path.join(subdirectory, 'source.txt'), 'original\n');
+  await submodule.add('.');
+  await submodule.commit('initial');
+  const commit = (await submodule.revparse(['HEAD'])).trim();
+  await writeFile(path.join(directory, '.gitmodules'), '[submodule "lib"]\n\tpath = lib\n\turl = ./lib\n');
+  await git.add('.');
+  await git.commit('initial');
+  await rename(subdirectory, path.join(directory, 'moved-lib'));
+  await writeFile(path.join(directory, '.gitmodules'), '[submodule "lib"]\n\tpath = moved-lib\n\turl = ./lib\n');
+  // Source lines resembling patch headers must not be mistaken for file boundaries.
+  await writeFile(path.join(directory, 'a-large.txt'), 'diff --git a/example b/example\n@@ -1 +1 @@\n'.repeat(55000));
+  await writeFile(path.join(directory, 'z-small.txt'), 'unrelated\n');
+  await git.add('.');
+  await writeFile(path.join(directory, 'moved-lib', 'source.txt'), 'changed\n');
+
+  for (const scope of ['staged', 'uncommitted']) {
+    const files = await review.files(scope);
+    const file = files.find(file => file.path === 'moved-lib');
+    assert.equal(file.status, 'R');
+    assert.equal(file.originalPath, 'lib');
+    assert.deepEqual(file.gaps, []);
+    assert.equal(file.notice, scope === 'staged' ? 'File renamed without text changes.' : undefined);
+    assert.equal(file.additions, scope === 'staged' ? 0 : 1);
+    assert.equal(file.deletions, scope === 'staged' ? 0 : 1);
+    assert.deepEqual(file.hunks.flatMap(hunk => hunk.lines), scope === 'staged' ? [] : [
+      { kind: 'delete', text: `Subproject commit ${commit}`, oldLine: 1 },
+      { kind: 'add', text: `Subproject commit ${commit}-dirty`, newLine: 1 },
+    ]);
+    assert.match(files.find(file => file.path === 'a-large.txt').notice, /Diff exceeds the 2 MB preview limit/);
+    assert.equal(files.find(file => file.path === 'z-small.txt').additions, 1);
   }
 });
 

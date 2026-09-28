@@ -15,6 +15,7 @@ Choose what to review:
 ## Review changes
 
 - Click a file on the left or filter by name. Its header arrow opens the editable file on disk in every scope. Deleted files have no arrow.
+- Renames appear once with an **R** badge and both paths, including moves to untracked files. Filter by either name; file actions and comments use the destination path. Rename detection uses Git's content similarity rules and a temporary comparison that leaves your staging area unchanged.
 - Expand hidden lines with the context buttons, or choose **Expand all** for the whole file.
 - Search with **Find**. Use `.*` for regex and **Aa** for case sensitivity. Expand context to include hidden lines in search.
 - Long source lines wrap by default. Use **Toggle word wrap** in the toolbar to change this; your choice is remembered when the review reloads.

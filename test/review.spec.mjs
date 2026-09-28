@@ -149,6 +149,45 @@ test('file arrows open existing and conflicted files but are absent on deleted f
   }
 });
 
+test('renames show both paths, filter by either name, and use the destination for actions and comments', async ({ page }, testInfo) => {
+  const data = structuredClone(seed);
+  const originalPath = 'previous/original.ts';
+  const destination = 'src/renamed.ts';
+  data.files = [
+    { ...file, status: 'R', originalPath, path: destination },
+    { ...file, status: 'R', originalPath: 'before.txt', path: 'after.txt', additions: 0, deletions: 0, hunks: [], gaps: [], notice: 'File renamed without text changes.' },
+  ];
+  data.comments = [];
+  await mount(page, data);
+  const card = page.locator(`.file-card[data-path="${destination}"]`);
+  const link = page.locator(`.file-link[data-path="${destination}"]`);
+  await expect(card.getByRole('heading')).toHaveText(`${originalPath} → ${destination}`);
+  await expect(card.locator('.file-status')).toHaveText('R');
+  await expect(link).toHaveAttribute('title', `${originalPath} → ${destination}`);
+  await expect(link).toContainText(`from ${originalPath}`);
+  await expect(page.locator('.file-card[data-path="after.txt"] .file-notice')).toHaveText('File renamed without text changes.');
+  await expect(page.locator('.file-card[data-path="after.txt"] .diff-line')).toHaveCount(0);
+  for (const query of ['ORIGINAL', 'renamed']) {
+    const filter = page.getByRole('textbox', { name: 'Filter files' });
+    await filter.fill(query);
+    await expect(page.locator('.file-link')).toHaveCount(1);
+    await expect(link).toBeVisible();
+    await filter.press('Enter');
+    await expect(link).toHaveAttribute('aria-current', 'true');
+  }
+  await page.getByRole('textbox', { name: 'Filter files' }).fill('');
+  await card.getByRole('button', { name: 'Open file in editor' }).click();
+  expect(await page.evaluate(() => window.messages.filter(message => message.type === 'open').at(-1))).toEqual({ type: 'open', path: destination, line: 1 });
+  await card.locator('.diff-line.delete .add-comment').click();
+  await page.getByRole('textbox', { name: 'Write a comment' }).fill('Keep this behavior after the move.');
+  await page.getByRole('button', { name: 'Save comment', exact: true }).click();
+  expect(await page.evaluate(() => window.messages.filter(message => message.type === 'comment').at(-1))).toMatchObject({ path: destination, side: 'old', line: 19 });
+  await expect(card.locator('.inline-comment')).toHaveCount(1);
+  await page.locator('.comment-card').getByRole('button', { name: 'Jump to comment' }).click();
+  await expect(card.locator('.diff-line.delete')).toHaveClass(/flash/);
+  await page.screenshot({ path: testInfo.outputPath('renames.png'), fullPage: true });
+});
+
 test('repository switches immediately clear all views and ignore late state from the previous repository', async ({ page }) => {
   const data = structuredClone(seed);
   data.repositories.push({ root: '/workspace/other', name: 'other' });

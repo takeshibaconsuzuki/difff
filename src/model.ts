@@ -30,6 +30,7 @@ export interface ContextGap {
 
 export interface ReviewFile {
   path: string;
+  originalPath?: string;
   status: string;
   additions: number;
   deletions: number;

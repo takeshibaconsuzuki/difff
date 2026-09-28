@@ -114,6 +114,7 @@ h2, p { margin: 0; }
 .file-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .file-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .file-title h2 { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
+.original-path { color: var(--muted); }
 .file-actions { display: flex; align-items: center; gap: 9px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); }
 .added-stat { color: var(--green); }
 .deleted-stat { color: var(--red); }

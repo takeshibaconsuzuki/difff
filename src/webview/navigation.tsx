@@ -78,7 +78,7 @@ export const FilesPane = memo(function FilesPane({ review, activePath, jump, fil
   filterRef: RefObject<HTMLInputElement | null>;
 }) {
   const [filter, setFilter] = useState('');
-  const files = review.files.filter(file => file.path.toLowerCase().includes(filter.toLowerCase()));
+  const files = review.files.filter(file => [file.path, file.originalPath].some(path => path?.toLowerCase().includes(filter.toLowerCase())));
   return <aside className="files-pane" aria-label="Changed files">
     <div className="pane-heading">FILES <span id="file-count" className="count">{review.files.length}</span></div>
     <input id="file-filter" ref={filterRef} className="file-filter" placeholder="Jump to file…" aria-label="Filter files" value={filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => {
@@ -88,9 +88,9 @@ export const FilesPane = memo(function FilesPane({ review, activePath, jump, fil
       {files.map(file => {
         const slash = file.path.lastIndexOf('/');
         const count = review.comments.filter(comment => comment.path === file.path && comment.scope === review.scope).length;
-        return <Button key={file.path} title={file.path} data-path={file.path} className={`file-link${file.path === activePath ? ' active' : ''}`} aria-current={file.path === activePath} onClick={() => jump(file.path)}>
+        return <Button key={file.path} title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path} data-path={file.path} className={`file-link${file.path === activePath ? ' active' : ''}`} aria-current={file.path === activePath} onClick={() => jump(file.path)}>
           <FileStatus status={file.status} />
-          <span className="file-name"><span className="basename">{file.path.slice(slash + 1)}</span>{slash >= 0 && <span className="directory">{file.path.slice(0, slash)}</span>}</span>
+          <span className="file-name"><span className="basename">{file.path.slice(slash + 1)}</span>{slash >= 0 && <span className="directory">{file.path.slice(0, slash)}</span>}{file.originalPath && <span className="directory">from {file.originalPath}</span>}</span>
           {!!count && <span className="comment-dot">{count}</span>}
         </Button>;
       })}

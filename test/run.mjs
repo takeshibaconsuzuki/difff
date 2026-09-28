@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { simpleGit } from 'simple-git';
@@ -30,6 +30,8 @@ try {
   await git.addConfig('commit.gpgsign', 'false');
   await writeFile(path.join(directory, 'review.txt'), 'committed contents\n');
   await writeFile(path.join(directory, 'deleted.txt'), 'deleted contents\n');
+  await writeFile(path.join(directory, 'original.txt'), 'one\ntwo\nthree\nfour\nfive\n');
+  await writeFile(path.join(directory, 'unstaged-original.txt'), 'untracked one\nuntracked two\nuntracked three\nuntracked four\n');
   await writeFile(path.join(directory, 'conflict.txt'), 'base\n');
   await git.add('.');
   await git.commit('initial');
@@ -45,6 +47,10 @@ try {
   await git.add('review.txt');
   await writeFile(path.join(directory, 'review.txt'), 'working contents\n');
   await git.rm('deleted.txt');
+  await git.mv('original.txt', 'renamed.txt');
+  await writeFile(path.join(directory, 'renamed.txt'), 'one\ntwo\nthree\nfour\nworking\n');
+  await rename(path.join(directory, 'unstaged-original.txt'), path.join(directory, 'unstaged-renamed.txt'));
+  await writeFile(path.join(directory, 'unstaged-renamed.txt'), 'untracked one\nuntracked two\nuntracked three\nchanged\n');
 
   await runTests({
     version: '1.138.0',

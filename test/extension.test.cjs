@@ -55,12 +55,23 @@ exports.run = async function run() {
         await expect(deleted).toBeVisible();
         await expect(deleted.getByRole('button', { name: 'Open file in editor' })).toHaveCount(0);
       }
-      for (const filename of ['review.txt', 'conflict.txt']) {
+      const renamed = review.locator('.file-card[data-path="renamed.txt"]');
+      await expect(renamed.locator('.file-status')).toHaveText(scope === 'unstaged' ? 'M' : 'R');
+      await expect(renamed.getByRole('heading')).toHaveText(scope === 'unstaged' ? 'renamed.txt' : 'original.txt → renamed.txt');
+      const untrackedRename = review.locator('.file-card[data-path="unstaged-renamed.txt"]');
+      if (scope === 'staged') await expect(untrackedRename).toHaveCount(0);
+      else {
+        await expect(untrackedRename.locator('.file-status')).toHaveText('R');
+        await expect(untrackedRename.getByRole('heading')).toHaveText('unstaged-original.txt → unstaged-renamed.txt');
+      }
+      for (const filename of ['review.txt', 'conflict.txt', 'renamed.txt', ...(scope === 'staged' ? [] : ['unstaged-renamed.txt'])]) {
         await review.locator(`.file-card[data-path="${filename}"]`).getByRole('button', { name: 'Open file in editor' }).click();
         await expect.poll(() => vscode.window.activeTextEditor?.document.uri.fsPath).toBe(path.join(directory, filename));
         const opened = vscode.window.activeTextEditor.document;
         assert.equal(opened.uri.scheme, 'file');
         if (filename === 'review.txt') assert.equal(opened.getText(), 'working contents\n');
+        else if (filename === 'renamed.txt') assert.equal(opened.getText(), 'one\ntwo\nthree\nfour\nworking\n');
+        else if (filename === 'unstaged-renamed.txt') assert.equal(opened.getText(), 'untracked one\nuntracked two\nuntracked three\nchanged\n');
         else assert.match(opened.getText(), /<<<<<<< HEAD/);
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         await vscode.commands.executeCommand('difff.openReview');
