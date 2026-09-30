@@ -63,7 +63,7 @@
     "vscode:prepublish": "npm run check && node esbuild.mjs --production",
     "pretest": "npm run compile",
     "test": "npm run test:unit && npm run test:ui && node test/run.mjs",
-    "test:unit": "node --test test/git.test.mjs",
+    "test:unit": "node --test test/*.test.mjs",
     "test:ui": "playwright test",
     "build": "vsce package --no-dependencies --skip-license"
   },

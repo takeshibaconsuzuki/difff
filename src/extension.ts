@@ -69,7 +69,12 @@ class ReviewPanel implements vscode.Disposable {
 
   private async repositories(): Promise<Repository[]> {
     const roots = new Set<string>();
+    const rootKey = (value: string) => {
+      const root = path.resolve(value);
+      return process.platform === 'win32' ? root.toLowerCase() : root;
+    };
     // The built-in Git extension also knows about nested repositories and submodules.
+    // Keep its path spelling first: saved comments use these repository identities.
     const gitExtension = vscode.extensions.getExtension<{ getAPI(version: number): { repositories: { rootUri: vscode.Uri }[] } }>('vscode.git');
     if (gitExtension) {
       try {
@@ -77,18 +82,23 @@ class ReviewPanel implements vscode.Disposable {
         for (const repository of api.repositories) if (repository.rootUri.scheme === 'file') roots.add(repository.rootUri.fsPath);
       } catch { /* Workspace probing below works when the Git extension is disabled. */ }
     }
+    const workspaceRoots = new Set<string>();
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       if (folder.uri.scheme !== 'file') continue;
-      try { roots.add((await simpleGit(folder.uri.fsPath).revparse(['--show-toplevel'])).trim()); }
-      catch { /* Non-Git workspace folders do not need a review entry. */ }
+      try {
+        const root = (await simpleGit(folder.uri.fsPath).revparse(['--show-toplevel'])).trim();
+        roots.add(root);
+        workspaceRoots.add(rootKey(root));
+      } catch { /* Non-Git workspace folders do not need a review entry. */ }
     }
     const repositories = new Map<string, Repository>();
     for (const value of roots) {
       const root = path.resolve(value);
-      const key = process.platform === 'win32' ? root.toLowerCase() : root;
+      const key = rootKey(root);
       if (!repositories.has(key)) repositories.set(key, { root, name: path.basename(root) });
     }
-    return [...repositories.values()];
+    // Prefer workspace roots without replacing the identities chosen above.
+    return [...new Set([...workspaceRoots, ...repositories.keys()])].flatMap(key => repositories.get(key) ?? []);
   }
 
   private async refresh(discover = false): Promise<void> {
