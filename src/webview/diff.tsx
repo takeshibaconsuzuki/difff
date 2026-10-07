@@ -75,7 +75,7 @@ export const DiffFile = memo(function DiffFile({ file, comments, draft, busy, sa
       <div className="file-title"><FileStatus status={file.status} /><h2>{file.originalPath && <><span className="original-path">{file.originalPath}</span>{' → '}</>}{file.path}</h2></div>
       <div className="file-actions">
         <span className="added-stat">+{file.additions}</span><span className="deleted-stat">−{file.deletions}</span>
-        {file.status !== 'D' && <Button title="Open file in editor" className="open-file" onClick={() => post({ type: 'open', path: file.path, line: 1 })}>↗</Button>}
+        {file.canOpen && <Button title="Open file in editor" className="open-file" onClick={() => post({ type: 'open', path: file.path, line: 1 })}>↗</Button>}
       </div>
     </header>
     {file.notice && <p className="file-notice">{file.notice}</p>}

@@ -4,6 +4,7 @@
 - Do not install dependencies globally. Install them into the project instead, using methods such as vendoring or virtual environments.
 - Do not manually wrap prose in markdown or text files. Use newlines only when they serve a structural or semantic purpose.
 - Delegate aggressively to well-maintained libraries, even when the current requirement is small or isolated. They usually handle edge cases better and give us a stronger base for future requirements.
+- We are still in development. Do not implement backwards compatibility or migrations.
 
 # Development
 

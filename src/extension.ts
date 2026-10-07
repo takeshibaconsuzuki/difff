@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { simpleGit } from 'simple-git';
 import { GitReview } from './git';
-import { findAnchor, formatComments, type ClientMessage, type HostMessage, type Repository, type ReviewComment, type ReviewState } from './model';
+import { findAnchor, formatComments, sameComparison, WORKING, type ClientMessage, type HostMessage, type Repository, type ReviewComment, type ReviewState } from './model';
 import { commentSchema, messageSchema } from './validation';
 
 const STORAGE_KEY = 'difff.comments.v1';
@@ -22,7 +22,7 @@ class ReviewPanel implements vscode.Disposable {
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private comments: ReviewComment[];
-  private state: ReviewState = { repositories: [], repository: '', branch: '', scope: 'uncommitted', ignoreWhitespace: true, files: [], comments: [] };
+  private state: ReviewState = { repositories: [], repository: '', branch: '', baseRef: 'HEAD', endRef: WORKING, ignoreWhitespace: true, files: [], comments: [] };
   private gitReview?: GitReview;
   private queue = Promise.resolve();
   private closed = false;
@@ -114,7 +114,7 @@ class ReviewPanel implements vscode.Disposable {
       try {
         const git = new GitReview(this.state.repository, this.state.ignoreWhitespace);
         this.gitReview = git;
-        [this.state.files, this.state.branch] = await Promise.all([git.files(this.state.scope), git.branch()]);
+        [this.state.files, this.state.branch] = await Promise.all([git.files(this.state.baseRef, this.state.endRef), git.branch()]);
       } catch (error) {
         this.state.files = [];
         this.state.error = `Unable to load changes. ${error instanceof Error ? error.message : String(error)}`;
@@ -134,7 +134,8 @@ class ReviewPanel implements vscode.Disposable {
     const comment = 'id' in message ? this.comments.find(item => item.id === message.id && item.repository === this.state.repository) : undefined;
     switch (message.type) {
       case 'ready':
-        this.state.scope = message.scope ?? 'uncommitted';
+        this.state.baseRef = message.baseRef ?? 'HEAD';
+        this.state.endRef = message.endRef ?? WORKING;
         this.state.repository = message.repository ?? '';
         this.state.ignoreWhitespace = message.ignoreWhitespace ?? true;
         await this.refresh(true);
@@ -144,8 +145,9 @@ class ReviewPanel implements vscode.Disposable {
         await this.refresh();
         break;
       case 'refresh': await this.refresh(true); break;
-      case 'scope':
-        this.state.scope = message.scope;
+      case 'comparison':
+        this.state.baseRef = message.baseRef;
+        this.state.endRef = message.endRef;
         await this.refresh();
         break;
       case 'repository':
@@ -164,9 +166,9 @@ class ReviewPanel implements vscode.Disposable {
       }
       case 'comment': {
         const line = findAnchor(this.state.files.find(file => file.path === message.path), message.side, message.line);
-        if (message.repository !== this.state.repository || message.scope !== this.state.scope || !line || line.text !== message.code) throw new Error('This line or review scope has changed. Refresh the diff before commenting. Your draft is still available.');
+        if (message.repository !== this.state.repository || !sameComparison(message, this.state) || !line || line.text !== message.code) throw new Error('This line or comparison has changed. Refresh the diff before commenting. Your draft is still available.');
         await this.save([...this.comments, {
-          id: randomUUID(), repository: this.state.repository, scope: this.state.scope,
+          id: randomUUID(), repository: this.state.repository, baseRef: this.state.baseRef, endRef: this.state.endRef,
           path: message.path, side: message.side, line: message.line, code: line.text,
           body: message.body, createdAt: new Date().toISOString(),
         }]);
@@ -194,8 +196,9 @@ class ReviewPanel implements vscode.Disposable {
       }
       case 'jump':
         if (comment) {
-          if (comment.scope !== this.state.scope) {
-            this.state.scope = comment.scope;
+          if (!sameComparison(comment, this.state)) {
+            this.state.baseRef = comment.baseRef;
+            this.state.endRef = comment.endRef;
             await this.refresh();
           }
           const file = this.state.files.find(item => item.path === comment.path);
@@ -209,7 +212,7 @@ class ReviewPanel implements vscode.Disposable {
         break;
       case 'open': {
         const file = this.state.files.find(file => file.path === message.path);
-        if (!file || file.status === 'D') break;
+        if (!file || !file.canOpen) break;
         const uri = vscode.Uri.file(git().resolve(file.path));
         const document = await vscode.workspace.openTextDocument(uri);
         const line = Math.min(message.line - 1, document.lineCount - 1);

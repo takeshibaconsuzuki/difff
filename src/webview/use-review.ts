@@ -1,12 +1,12 @@
 import { useEffect, useReducer } from 'react';
-import { findAnchor, type HostMessage, type ReviewState } from '../model';
+import { findAnchor, WORKING, type HostMessage, type ReviewState } from '../model';
 import { initialLocalState, persist, post, rowId, type Draft } from './bridge';
 
 interface UIState {
   review: ReviewState;
   busy: boolean;
   saving: boolean;
-  loadingReview?: Pick<ReviewState, 'repository' | 'scope' | 'ignoreWhitespace'>;
+  loadingReview?: Pick<ReviewState, 'repository' | 'baseRef' | 'endRef' | 'ignoreWhitespace'>;
   draft?: Draft;
   activePath: string;
   filesOpen: boolean;
@@ -32,7 +32,7 @@ type Action =
   | { type: 'beginDraft'; draft: Draft }
   | { type: 'startSaving' }
   | { type: 'repository'; root: string }
-  | { type: 'scope'; scope: ReviewState['scope'] }
+  | { type: 'comparison'; baseRef: string; endRef: string }
   | { type: 'ignoreWhitespace'; ignoreWhitespace: boolean }
   | { type: 'draftBody'; body: string }
   | { type: 'cancelDraft' }
@@ -49,7 +49,7 @@ type Action =
   | { type: 'toggleTheme' };
 
 const initialState: UIState = {
-  review: { repositories: [], repository: initialLocalState.draft?.repository ?? initialLocalState.repository ?? '', branch: '', scope: initialLocalState.draft?.scope ?? initialLocalState.scope ?? 'uncommitted', ignoreWhitespace: initialLocalState.ignoreWhitespace ?? true, files: [], comments: [] },
+  review: { repositories: [], repository: initialLocalState.draft?.repository ?? initialLocalState.repository ?? '', branch: '', baseRef: initialLocalState.draft?.baseRef ?? initialLocalState.baseRef ?? 'HEAD', endRef: initialLocalState.draft?.endRef ?? initialLocalState.endRef ?? WORKING, ignoreWhitespace: initialLocalState.ignoreWhitespace ?? true, files: [], comments: [] },
   busy: true,
   saving: false,
   draft: initialLocalState.draft,
@@ -75,7 +75,7 @@ function reducer(state: UIState, action: Action): UIState {
       const message = action.message;
       switch (message.type) {
         case 'state':
-          if (state.loadingReview && (message.state.repository !== state.loadingReview.repository || message.state.scope !== state.loadingReview.scope || message.state.ignoreWhitespace !== state.loadingReview.ignoreWhitespace)) return state;
+          if (state.loadingReview && (message.state.repository !== state.loadingReview.repository || message.state.baseRef !== state.loadingReview.baseRef || message.state.endRef !== state.loadingReview.endRef || message.state.ignoreWhitespace !== state.loadingReview.ignoreWhitespace)) return state;
           return { ...state, review: message.state, loadingReview: undefined, activePath: message.state.files.some(file => file.path === state.activePath) ? state.activePath : message.state.files[0]?.path ?? '' };
         case 'busy': return { ...state, busy: message.busy };
         case 'notice': return { ...state, notice: message };
@@ -106,12 +106,13 @@ function reducer(state: UIState, action: Action): UIState {
     case 'requireDraft': return requireDraft(state, action.text);
     case 'repository':
     case 'ignoreWhitespace':
-    case 'scope': {
+    case 'comparison': {
       if (state.draft || state.saving || state.loadingReview) return state;
       const repository = action.type === 'repository' ? action.root : state.review.repository;
-      const scope = action.type === 'scope' ? action.scope : state.review.scope;
+      const baseRef = action.type === 'comparison' ? action.baseRef ?? state.review.baseRef : state.review.baseRef;
+      const endRef = action.type === 'comparison' ? action.endRef ?? state.review.endRef : state.review.endRef;
       const ignoreWhitespace = action.type === 'ignoreWhitespace' ? action.ignoreWhitespace : state.review.ignoreWhitespace;
-      return { ...state, busy: true, loadingReview: { repository, scope, ignoreWhitespace }, review: { ...state.review, repository, scope, ignoreWhitespace, branch: '', files: [], comments: [], error: undefined }, activePath: '', reveal: undefined, draftWarning: undefined, notice: undefined };
+      return { ...state, busy: true, loadingReview: { repository, baseRef, endRef, ignoreWhitespace }, review: { ...state.review, repository, baseRef, endRef, ignoreWhitespace, branch: '', files: [], comments: [], error: undefined }, activePath: '', reveal: undefined, draftWarning: undefined, notice: undefined };
     }
     case 'startSaving': return state.draft ? { ...state, saving: true } : state;
     case 'beginDraft': return state.saving || state.loadingReview ? state : state.draft ? requireDraft(state, 'Save or cancel your current draft first.') : { ...state, draft: action.draft };
@@ -137,12 +138,12 @@ export function useReview() {
   useEffect(() => {
     const onMessage = (event: MessageEvent<HostMessage>) => { dispatch({ type: 'host', message: event.data }); };
     window.addEventListener('message', onMessage);
-    post({ type: 'ready', scope: initialState.review.scope, repository: initialState.review.repository, ignoreWhitespace: initialState.review.ignoreWhitespace });
+    post({ type: 'ready', baseRef: initialState.review.baseRef, endRef: initialState.review.endRef, repository: initialState.review.repository, ignoreWhitespace: initialState.review.ignoreWhitespace });
     return () => { window.removeEventListener('message', onMessage); };
   }, []);
 
-  const { draft, query, regex, matchCase, wordWrap, theme, review: { scope, repository, ignoreWhitespace }, notice, reveal, draftWarning } = state;
-  useEffect(() => { persist({ draft, query, regex, matchCase, wordWrap, theme, scope, repository, ignoreWhitespace }); }, [draft, query, regex, matchCase, wordWrap, theme, scope, repository, ignoreWhitespace]);
+  const { draft, query, regex, matchCase, wordWrap, theme, review: { repository, baseRef, endRef, ignoreWhitespace }, notice, reveal, draftWarning } = state;
+  useEffect(() => { persist({ draft, query, regex, matchCase, wordWrap, theme, repository, baseRef, endRef, ignoreWhitespace }); }, [draft, query, regex, matchCase, wordWrap, theme, repository, baseRef, endRef, ignoreWhitespace]);
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => { dispatch({ type: 'clearNotice' }); }, notice.error ? 9000 : 3500);

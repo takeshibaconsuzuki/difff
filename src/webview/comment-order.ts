@@ -1,4 +1,4 @@
-import type { ReviewComment, ReviewState } from '../model';
+import { sameComparison, type ReviewComment, type ReviewState } from '../model';
 
 function rowPosition(lines: Map<number, number> | undefined, line: number): number {
   const exact = lines?.get(line);
@@ -35,16 +35,17 @@ export function orderComments(review: ReviewState, comments: ReviewComment[]): R
     }
   }
   return [...comments].sort((a, b) => {
-    const scope = Number(b.scope === review.scope) - Number(a.scope === review.scope);
-    if (scope) return scope;
-    if (a.scope !== b.scope) return a.scope.localeCompare(b.scope);
+    const current = Number(sameComparison(b, review)) - Number(sameComparison(a, review));
+    if (current) return current;
+    const comparison = a.baseRef.localeCompare(b.baseRef) || a.endRef.localeCompare(b.endRef);
+    if (comparison) return comparison;
     const aFile = positions.get(a.path);
     const bFile = positions.get(b.path);
     const file = (aFile?.index ?? Infinity) - (bFile?.index ?? Infinity);
     if (file) return file;
     if (a.path !== b.path) return a.path.localeCompare(b.path);
-    const aRow = a.scope === review.scope ? rowPosition(aFile?.[a.side], a.line) : a.line;
-    const bRow = b.scope === review.scope ? rowPosition(bFile?.[b.side], b.line) : b.line;
+    const aRow = sameComparison(a, review) ? rowPosition(aFile?.[a.side], a.line) : a.line;
+    const bRow = sameComparison(b, review) ? rowPosition(bFile?.[b.side], b.line) : b.line;
     return aRow - bRow || Number(a.side === 'new') - Number(b.side === 'new');
   });
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { findAnchor, type DiffLine, type ReviewComment, type Scope, type Side } from '../model';
+import { findAnchor, sameComparison, type DiffLine, type ReviewComment, type Side } from '../model';
 import { post, type Draft } from './bridge';
 import { CommentsPane, Composer, type CommentHandlers, type DraftHandlers } from './comments';
 import { DiffFile } from './diff';
@@ -18,7 +18,7 @@ function ReviewApp() {
   const { review, draft, saving } = state;
   const loading = !!state.loadingReview;
   const busy = state.busy || saving || loading;
-  const { repository, scope } = review;
+  const { repository, baseRef, endRef } = review;
   const diff = useRef<HTMLElement>(null);
   const navigating = useRef(false);
   const deletionAnchor = useRef<{ id: string; restore: () => void } | undefined>(undefined);
@@ -159,8 +159,8 @@ function ReviewApp() {
     const line = side === 'old' ? row.oldLine : row.newLine;
     if (!line) return;
     diff.current?.querySelector('textarea')?.focus({ preventScroll: true });
-    dispatch({ type: 'beginDraft', draft: { repository, scope, path, line, side, code: row.text, body: '' } });
-  }, [dispatch, repository, scope, saving]);
+    dispatch({ type: 'beginDraft', draft: { repository, baseRef, endRef, path, line, side, code: row.text, body: '' } });
+  }, [dispatch, repository, baseRef, endRef, saving]);
 
   const draftHandlers = useMemo<DraftHandlers>(() => ({
     change: body => { dispatch({ type: 'draftBody', body }); },
@@ -169,7 +169,7 @@ function ReviewApp() {
       if (!value.body.trim() || busy) return;
       dispatch({ type: 'startSaving' });
       if (value.id) post({ type: 'edit', id: value.id, body: value.body });
-      else post({ type: 'comment', repository: value.repository, path: value.path, line: value.line, side: value.side, code: value.code, body: value.body, scope: value.scope });
+      else post({ type: 'comment', repository: value.repository, path: value.path, line: value.line, side: value.side, code: value.code, body: value.body, baseRef: value.baseRef, endRef: value.endRef });
     },
   }), [dispatch, busy]);
 
@@ -193,21 +193,21 @@ function ReviewApp() {
   const commentsByFile = useMemo(() => {
     const grouped = new Map<string, ReviewComment[]>();
     for (const comment of review.comments) {
-      if (comment.scope !== review.scope) continue;
+      if (!sameComparison(comment, review)) continue;
       const list = grouped.get(comment.path) ?? [];
       list.push(comment);
       grouped.set(comment.path, list);
     }
     return grouped;
-  }, [review.comments, review.scope]);
+  }, [review]);
 
-  const draftFile = draft && draft.repository === repository && draft.scope === scope ? review.files.find(file => file.path === draft.path && findAnchor(file, draft.side, draft.line)?.text === draft.code) : undefined;
+  const draftFile = draft && draft.repository === repository && sameComparison(draft, review) ? review.files.find(file => file.path === draft.path && findAnchor(file, draft.side, draft.line)?.text === draft.code) : undefined;
   const searchCount = state.query ? `${search.result.matches.length ? search.index + 1 : 0}/${search.result.matches.length}${search.result.capped ? '+' : ''}` : '';
-  const changeScope = (scope: Scope) => {
-    if (busy || scope === review.scope) return;
-    if (draft) { dispatch({ type: 'requireDraft', text: 'Save or cancel your draft before changing scope.' }); return; }
-    dispatch({ type: 'scope', scope });
-    post({ type: 'scope', scope });
+  const changeComparison = (baseRef: string, endRef: string) => {
+    if (busy || sameComparison({ baseRef, endRef }, review)) return;
+    if (draft) { dispatch({ type: 'requireDraft', text: 'Save or cancel your draft before changing comparison.' }); return; }
+    dispatch({ type: 'comparison', baseRef, endRef });
+    post({ type: 'comparison', baseRef, endRef });
   };
 
   return <>
@@ -223,7 +223,7 @@ function ReviewApp() {
         dispatch(message);
         post(message);
       }}
-      searchCount={searchCount} hasMatches={!!search.result.matches.length} queryRef={queryInput} onScope={changeScope}
+      searchCount={searchCount} hasMatches={!!search.result.matches.length} queryRef={queryInput} onComparison={changeComparison}
       onRepository={root => {
         if (busy || root === repository) return;
         if (draft) { dispatch({ type: 'requireDraft', text: 'Save or cancel your draft before changing repositories.' }); return; }
@@ -234,11 +234,11 @@ function ReviewApp() {
       onFiles={() => { dispatch({ type: 'filesOpen', open: !state.filesOpen }); }} onEscape={() => diff.current?.focus()} />
     <div id="search-error" role="status">{search.result.error}</div>
     <div id="workspace" className={`workspace${state.commentsOpen ? '' : ' hide-comments'}${state.filesOpen ? ' show-files' : ''}`}>
-      <FilesPane key={JSON.stringify([repository, scope])} review={review} activePath={state.activePath} jump={jumpToFile} filterRef={fileFilter} />
+      <FilesPane key={JSON.stringify([repository, baseRef, endRef])} review={review} activePath={state.activePath} jump={jumpToFile} filterRef={fileFilter} />
       <main id="diff" ref={diff} className={state.wordWrap ? 'word-wrap' : undefined} aria-label="Diff review" tabIndex={-1} aria-busy={busy}>
         {draft && !draftFile && <Composer draft={draft} busy={busy} saving={saving} handlers={draftHandlers} />}
-        {!loading && (review.error || !review.files.length) && <div className="diff-empty"><p>{review.error ?? `No ${scope} changes${review.ignoreWhitespace ? ' with whitespace ignored' : ''}.`}</p></div>}
-        {review.files.map(file => <DiffFile key={JSON.stringify([repository, scope, file.path])} file={file} comments={commentsByFile.get(file.path) ?? noComments}
+        {!loading && (review.error || !review.files.length) && <div className="diff-empty"><p>{review.error ?? `No changes for ${baseRef} → ${endRef}${review.ignoreWhitespace ? ' with whitespace ignored' : ''}.`}</p></div>}
+        {review.files.map(file => <DiffFile key={JSON.stringify([repository, baseRef, endRef, file.path])} file={file} comments={commentsByFile.get(file.path) ?? noComments}
           draft={draftFile === file ? draft : undefined} busy={busy} saving={saving} startDraft={startDraft} draftHandlers={draftHandlers} commentHandlers={commentHandlers}
           matches={search.byRow} activeMatch={search.index} flashRow={state.reveal?.rowId} pulseSequence={state.reveal?.sequence ?? 0} />)}
       </main>
@@ -250,7 +250,7 @@ function ReviewApp() {
         if (draft?.id === id && composer) { focusComposer(composer); return; }
         if (draft) { dispatch({ type: 'requireDraft', text: 'Save or cancel your draft before jumping to another comment.' }); return; }
         const comment = review.comments.find(comment => comment.id === id);
-        if (comment && comment.scope !== scope) dispatch({ type: 'scope', scope: comment.scope });
+        if (comment && !sameComparison(comment, review)) dispatch({ type: 'comparison', baseRef: comment.baseRef, endRef: comment.endRef });
         post({ type: 'jump', id });
       }} />
     </div>
@@ -260,7 +260,7 @@ function ReviewApp() {
       if (draft?.id) dispatch({ type: 'cancelDraft' });
       post({ type: 'clear' });
     }}>
-      <form method="dialog"><h2>Clear all comments?</h2><p>This removes every review comment in this repository, across all three scopes.</p>
+      <form method="dialog"><h2>Clear all comments?</h2><p>This removes every review comment in this repository, across all comparisons.</p>
         <div className="dialog-actions"><button value="cancel">Keep comments</button><button value="clear" className="danger">Clear all comments</button></div>
       </form>
     </dialog>

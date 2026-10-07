@@ -79,7 +79,7 @@ test('Windows root defaults retain saved repository identities and comment actio
   const submodule = `${root}\\lib`;
   const saved = {
     id: 'saved-comment', repository: root, path: 'review.txt', line: 1, side: 'new', code: 'working contents',
-    scope: 'uncommitted', body: 'Previously saved comment', createdAt: '2026-01-01',
+    baseRef: 'HEAD', endRef: 'WORKING', body: 'Previously saved comment', createdAt: '2026-01-01',
   };
   const host = reviewHost({
     platform: 'win32', workspaceRoots: ['E:/Devel/difff'], gitRoots: [submodule, root], comments: [saved],
@@ -119,4 +119,21 @@ test('workspace probing still works when the Git extension is disabled', async (
   await host.send({ type: 'ready' });
   assert.equal(host.state.repository, 'E:\\Devel\\difff');
   assert.equal(host.state.repositories.length, 1);
+});
+
+
+test('comparison defaults and comment jumps retain both endpoints', async () => {
+  const root = '/work/review';
+  const saved = { id: 'ref-comment', repository: root, path: 'review.txt', line: 1, side: 'new', code: 'text', baseRef: 'abc1234', endRef: 'def5678', body: 'Review these commits', createdAt: '2026-01-01' };
+  const host = reviewHost({ platform: 'linux', workspaceRoots: [root], gitRoots: [root], comments: [saved] });
+  await host.send({ type: 'ready' });
+  assert.equal(host.state.baseRef, 'HEAD');
+  assert.equal(host.state.endRef, 'WORKING');
+  await host.send({ type: 'jump', id: saved.id });
+  assert.equal(host.state.baseRef, saved.baseRef);
+  assert.equal(host.state.endRef, saved.endRef);
+  await host.send({ type: 'comparison', baseRef: saved.baseRef, endRef: 'HEAD' });
+  await host.send({ type: 'jump', id: saved.id });
+  assert.equal(host.state.endRef, saved.endRef);
+
 });

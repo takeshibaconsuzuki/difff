@@ -1,8 +1,9 @@
 import type { z } from 'zod';
-import type { commentSchema, messageSchema, scopeSchema } from './validation';
+import type { commentSchema, messageSchema } from './validation';
 
-export type Scope = z.infer<typeof scopeSchema>;
 export type Side = 'old' | 'new';
+export const WORKING = 'WORKING';
+export const INDEX = 'INDEX';
 
 export interface DiffLine {
   kind: 'context' | 'add' | 'delete' | 'note';
@@ -33,6 +34,7 @@ export interface ContextGap {
 export interface ReviewFile {
   path: string;
   originalPath?: string;
+  canOpen: boolean;
   status: string;
   additions: number;
   deletions: number;
@@ -53,7 +55,8 @@ export interface ReviewState {
   repositories: Repository[];
   repository: string;
   branch: string;
-  scope: Scope;
+  baseRef: string;
+  endRef: string;
   files: ReviewFile[];
   ignoreWhitespace: boolean;
   comments: ReviewComment[];
@@ -70,9 +73,19 @@ export type HostMessage =
   | { type: 'saveFailed' }
   | { type: 'saved' };
 
-export function sourceLabel(comment: Pick<ReviewComment, 'scope' | 'side'>): string {
-  if (comment.side === 'old') return comment.scope === 'unstaged' ? 'index' : 'HEAD';
-  return comment.scope === 'staged' ? 'index' : 'working tree';
+export interface Comparison {
+  baseRef: string;
+  endRef: string;
+}
+
+export function sameComparison(a: Comparison, b: Comparison): boolean {
+  return a.baseRef === b.baseRef && a.endRef === b.endRef;
+}
+
+export function sourceLabel(comment: Pick<ReviewComment, 'side' | 'baseRef' | 'endRef'>): string {
+  if (comment.side === 'new') return comment.endRef;
+  if ([INDEX, WORKING].includes(comment.baseRef) || [INDEX, WORKING].includes(comment.endRef)) return comment.baseRef;
+  return `merge base of ${comment.baseRef} and ${comment.endRef}`;
 }
 
 export function formatComments(comments: ReviewComment[]): string {

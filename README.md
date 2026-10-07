@@ -6,16 +6,22 @@ Review local Git changes in VS Code and collect line comments to share with a co
 
 Install the `.vsix` using **Extensions: Install from VSIX** in the Command Palette. Open a trusted Git folder, then run **difff: Review Changes**. Git must be installed.
 
-Choose what to review:
+Enter the two endpoints and press Enter or **Apply**. Both inputs accept branches, tags, commit hashes, revisions such as `HEAD~3`, and the special values `INDEX` and `WORKING`.
 
-- **Uncommitted:** all changes since the last commit, including new files.
-- **Staged:** changes staged for your next commit.
-- **Unstaged:** changes you haven't staged, including new files.
+| Review | From | To |
+| --- | --- | --- |
+| All uncommitted changes (default) | `HEAD` | `WORKING` |
+| Staged changes | `HEAD` | `INDEX` |
+| Unstaged changes | `INDEX` | `WORKING` |
+| Last commit | `HEAD^` | `HEAD` |
+| Branch changes since the merge base | `main` | `HEAD` |
+
+Two commit refs use Git's three-dot semantics: changes from their merge base to the end ref. Comparisons involving `INDEX` or `WORKING` compare the endpoints directly. `WORKING` includes untracked files. Reversing the endpoints reverses local comparisons; for example, `WORKING ? INDEX` shows what would change when returning to the staged contents.
 
 ## Review changes
 
-- Click a file on the left or filter by name. Its header arrow opens the editable file on disk in every scope. Deleted files have no arrow.
-- Renames appear once with an **R** badge and both paths, including moves to untracked files. Filter by either name; file actions and comments use the destination path. Rename detection uses Git's content similarity rules and a temporary comparison that leaves your staging area unchanged.
+- Click a file on the left or filter by name. Its header arrow opens the editable file on disk and appears only when that path exists as a file in the working directory.
+- Renames appear once with an **R** badge and both paths, including moves to untracked files. Filter by either name; file actions and comments use the destination path. When reversing a rename whose original path has an untracked replacement, the affected paths appear as ordinary changes so each has an unambiguous comment location. Rename detection uses Git's content similarity rules and a temporary comparison that leaves your staging area unchanged.
 - Expand hidden lines with the context buttons, or choose **Expand all** for the whole file.
 - Search with **Find**. Use `.*` for regex and **Aa** for case sensitivity. Expand context to include hidden lines in search.
 - Long source lines wrap by default. Use **Toggle word wrap** in the toolbar to change this; your choice is remembered when the review reloads.
@@ -27,9 +33,9 @@ Choose what to review:
 
 Hover a source line, click **+**, write your comment, then **Save**. **Edit** and **Delete** work inline and in the comments panel.
 
-Click a comment in the right panel to jump to its source. Inline **Focus** finds it in the panel. Save or cancel your draft before switching scopes or jumping to another comment.
+Click a comment in the right panel to jump to its source. Inline **Focus** finds it in the panel. Save or cancel your draft before changing comparisons or jumping to another comment.
 
-**Copy comments** copies all comments for the selected repository, across scopes, ready to paste into an agent:
+**Copy comments** copies all comments for the selected repository, across comparisons, ready to paste into an agent:
 
 ```text
 src/example.ts:42

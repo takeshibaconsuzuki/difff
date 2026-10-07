@@ -46,8 +46,11 @@ exports.run = async function run() {
     // Keep file actions reachable when the test host starts with a narrow editor group.
     if (await review.locator('#toggle-comments').getAttribute('aria-expanded') === 'true') await review.locator('#toggle-comments').click();
     const directory = vscode.workspace.workspaceFolders[0].uri.fsPath;
-    for (const scope of ['uncommitted', 'staged', 'unstaged']) {
-      await review.locator(`[data-scope="${scope}"]`).click();
+    for (const scope of ['compare', 'staged', 'unstaged']) {
+      await review.getByRole('textbox', { name: 'Base ref', exact: true }).fill(scope === 'unstaged' ? 'INDEX' : 'HEAD');
+      await review.getByRole('textbox', { name: 'End ref', exact: true }).fill(scope === 'staged' ? 'INDEX' : 'WORKING');
+      const apply = review.getByRole('button', { name: 'Apply', exact: true });
+      if (await apply.isEnabled()) await apply.click();
       await expect(diff).toHaveAttribute('aria-busy', 'false');
       await expect(review.locator('.file-card[data-path="review.txt"]')).toBeVisible();
       const ignoreWhitespace = review.getByRole('button', { name: 'Ignore whitespace', exact: true });
@@ -76,6 +79,8 @@ exports.run = async function run() {
         await expect(untrackedRename.getByRole('heading')).toHaveText('unstaged-original.txt → unstaged-renamed.txt');
       }
       for (const filename of ['review.txt', 'conflict.txt', 'renamed.txt', ...(scope === 'staged' ? [] : ['unstaged-renamed.txt'])]) {
+        // Returning from a beside editor can recreate the webview in a narrow group.
+        if (await review.locator('#toggle-comments').getAttribute('aria-expanded') === 'true') await review.locator('#toggle-comments').click();
         await review.locator(`.file-card[data-path="${filename}"]`).getByRole('button', { name: 'Open file in editor' }).click();
         await expect.poll(() => vscode.window.activeTextEditor?.document.uri.fsPath).toBe(path.join(directory, filename));
         const opened = vscode.window.activeTextEditor.document;

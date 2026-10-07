@@ -1,9 +1,9 @@
-import { lstat, readFile } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { parsePatch, structuredPatch, type StructuredPatchHunk } from 'diff';
+import { formatPatch, parsePatch, reversePatch, structuredPatch, type StructuredPatchHunk } from 'diff';
 import { simpleGit, type SimpleGit } from 'simple-git';
-import type { DiffLine, Hunk, ReviewFile, Scope, Side } from './model';
+import { WORKING, INDEX, type DiffLine, type Hunk, type ReviewFile, type Side } from './model';
 import { contextGaps, expandAllContext, expandContext, header, revealContextLine, type ContextSource } from './context';
 import { withUntrackedComparison } from './git-renames';
 
@@ -53,29 +53,68 @@ export class GitReview {
     return (await this.git.raw(['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => 'detached HEAD')).trim();
   }
 
-  private async baseArgs(scope: Scope): Promise<string[]> {
-    if (scope === 'unstaged') return [];
-    if (scope === 'staged') return ['--cached'];
+  private async commit(ref: string): Promise<string> {
+    if (!ref || ref.startsWith('-') || ref.includes('\0')) throw new Error('Enter a Git commit ref.');
+    return (await this.git.raw(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]).catch(() => { throw new Error(`Cannot resolve ref "${ref}" to a commit.`); })).trim();
+  }
+
+  private async headOrEmptyTree(): Promise<string> {
     const head = await this.git.raw(['rev-parse', '--verify', 'HEAD']).catch(() => '');
     // The canonical empty tree does not require writing an object or opening a stdin stream.
     const format = head.trim() ? '' : (await this.git.raw(['rev-parse', '--show-object-format'])).trim();
-    const base = head.trim() || createHash(format === 'sha256' ? 'sha256' : 'sha1').update('tree 0\0').digest('hex');
-    return [base];
+    return head.trim() || createHash(format === 'sha256' ? 'sha256' : 'sha1').update('tree 0\0').digest('hex');
   }
 
-  async files(scope: Scope): Promise<ReviewFile[]> {
-    const base = await this.baseArgs(scope);
+  private async baseArgs(baseRef: string, endRef: string): Promise<string[]> {
+    if (baseRef === INDEX) return [];
+    if (endRef === INDEX || endRef === WORKING) {
+      const start = baseRef === 'HEAD' ? await this.headOrEmptyTree() : await this.commit(baseRef);
+      return endRef === INDEX ? ['--cached', start] : [start];
+    }
+    const [start, finish] = await Promise.all([this.commit(baseRef), this.commit(endRef)]);
+    const bases = (await this.git.raw(['merge-base', '--all', start, finish]).catch(() => { throw new Error(`No merge base found for "${baseRef}" and "${endRef}".`); })).trim().split('\n');
+    if (bases.length !== 1) throw new Error('Multiple merge bases found. Choose a more specific base ref.');
+    return [bases[0]!, finish];
+  }
+
+  async files(baseRef = 'HEAD', endRef = WORKING): Promise<ReviewFile[]> {
+    if (baseRef === endRef && (baseRef === INDEX || baseRef === WORKING)) return [];
+    const reverse = baseRef === WORKING || baseRef === INDEX && endRef !== WORKING;
+    const loaded = await this.loadFiles(reverse ? endRef : baseRef, reverse ? baseRef : endRef, reverse);
+    const files = reverse ? loaded.map(file => this.reverse(file)).sort((a, b) => a.path.localeCompare(b.path)) : loaded;
+    for (let i = 0; i < files.length; i += 4) {
+      await Promise.all(files.slice(i, i + 4).map(async file => { file.canOpen = await this.canOpen(file.path); }));
+    }
+    return files;
+  }
+
+  private async canOpen(file: string): Promise<boolean> {
+    return stat(this.resolve(file)).then(info => info.isFile()).catch(() => false);
+  }
+
+  private async loadFiles(baseRef: string, endRef: string, reverse: boolean): Promise<ReviewFile[]> {
+    const base = await this.baseArgs(baseRef, endRef);
     const paths = changedPaths(await this.git.raw(['diff', ...base, ...nameStatusArgs]));
     const recreated = new Set<string>();
     const renamed = new Map<string, ReviewFile>();
-    if (scope !== 'staged') {
+    if (endRef === WORKING) {
       const untracked = await this.git.raw(['ls-files', '--others', '--exclude-standard', '-z']);
       for (const file of untracked.split('\0')) {
         if (!file) continue;
-        if (scope === 'uncommitted' && paths.get(file)?.status === 'D') {
+        if (baseRef !== INDEX && paths.get(file)?.status === 'D') {
           paths.set(file, { status: 'M' });
           recreated.add(file);
         } else if (!paths.has(file)) paths.set(file, { status: '?' });
+      }
+      if (reverse) {
+        // A reused rename source would become both a rename destination and a
+        // deletion when reversed. Compare those paths independently instead.
+        for (const [file, change] of paths) {
+          if (!change.originalPath || paths.get(change.originalPath)?.status !== '?') continue;
+          paths.set(file, { status: 'A' });
+          paths.set(change.originalPath, { status: 'M' });
+          recreated.add(change.originalPath);
+        }
       }
       const deleted = new Set([...paths].filter(([, change]) => change.status === 'D').map(([file]) => file));
       const candidates = [...paths].filter(([, change]) => change.status === '?').map(([file]) => file);
@@ -109,6 +148,33 @@ export class GitReview {
     return files;
   }
 
+  private reverse(file: ReviewFile): ReviewFile {
+    const source = this.sources.get(file.snapshot);
+    const reversed = reversePatch({ oldFileName: file.originalPath ?? file.path, newFileName: file.path, oldHeader: '', newHeader: '', hunks: file.hunks.map(hunk => ({
+      oldStart: hunk.oldStart, oldLines: hunk.oldLines, newStart: hunk.newStart, newLines: hunk.newLines,
+      lines: hunk.lines.map(line => line.kind === 'note' ? line.text : `${line.kind === 'add' ? '+' : line.kind === 'delete' ? '-' : ' '}${line.text}`),
+    })) });
+    const hunks = reversed.hunks.map(toHunk);
+    // Ignored whitespace can leave a different spelling on each side of a context row.
+    const context = new Map(file.hunks.flatMap(hunk => hunk.lines.filter(line => line.kind === 'context').map(line => [line.oldLine, line])));
+    for (const hunk of hunks) for (const line of hunk.lines) {
+      const original = line.kind === 'context' ? context.get(line.newLine) : undefined;
+      if (original?.oldText !== undefined) { line.oldText = line.text; line.text = original.oldText; }
+    }
+    const result: ReviewFile = {
+      ...file, path: file.originalPath ?? file.path, originalPath: file.originalPath ? file.path : undefined,
+      status: file.status === 'A' || file.status === '?' ? 'D' : file.status === 'D' ? 'A' : file.status,
+      additions: file.deletions, deletions: file.additions, hunks,
+      gaps: file.gaps.map(gap => ({ ...gap, id: `${gap.newStart}:${gap.oldStart}:${gap.count}`, oldStart: gap.newStart, newStart: gap.oldStart })),
+    };
+    if (source) {
+      const old: string[] = [];
+      for (const hunk of expandAllContext(file, source).hunks) for (const line of hunk.lines) if (line.newLine !== undefined) old[line.newLine - 1] = line.text;
+      this.sources.set(file.snapshot, { old, new: source.old });
+    }
+    return result;
+  }
+
   expand(file: ReviewFile, gap: string, direction: 'up' | 'down'): ReviewFile {
     const source = this.sources.get(file.snapshot);
     return source ? expandContext(file, source, gap, direction) : file;
@@ -127,41 +193,38 @@ export class GitReview {
   private async patch(file: string, base: string[], originalPath?: string, git = this.git, context = 3): Promise<string> {
     let revisions = base;
     let paths = [file];
-    let renames = '--find-renames';
-    let selectPair = false;
     if (originalPath) {
-      const revision = base.length === 0 ? ':' : base[0] === '--cached' ? 'HEAD:' : `${base[0] ?? 'HEAD'}:`;
+      const revision = base.length === 0 ? ':' : base[0] === '--cached' ? `${base[1] ?? 'HEAD'}:` : `${base[0] ?? 'HEAD'}:`;
       const source = `${revision}${originalPath}`;
       const type = (await git.raw(['cat-file', '-t', source]).catch(() => '')).trim();
       if (type === 'blob') {
-        // Compare the chosen pair directly. Restricting rename detection to these
-        // pathspecs can select a different destination when a path became a directory.
-        revisions = base[0] === '--cached' ? [source, `:${file}`] : [source];
-        if (base[0] === '--cached') paths = [];
-        renames = '--no-renames';
+        // Rename detection has already selected the pair. Use those exact blobs
+        // for both previews and context, or compare the source to the working file.
+        const destination = base[0] === '--cached' ? `:${file}` : base.length === 2 ? `${base[1]}:${file}` : undefined;
+        revisions = destination ? [source, destination] : [source];
+        if (destination) paths = [];
       } else {
-        // Gitlinks are commit pointers, not blobs. Keep the complete candidate set
-        // so Git preserves their pairing, then select this pair from the patches.
-        paths = [];
-        selectPair = true;
+        // Gitlink objects need not exist in the parent repository. Read their
+        // pointer, and let Git report the destination (including working dirt).
+        const entry = revision === ':'
+          ? await git.raw(['ls-files', '--stage', '-z', '--', originalPath])
+          : await git.raw(['ls-tree', '-z', revision.slice(0, -1), '--', originalPath]);
+        const record = entry.split('\0').find(record => record.slice(record.indexOf('\t') + 1) === originalPath);
+        if (!record?.startsWith('160000 ')) throw new Error('Rename changed while loading. Refresh to review it.');
+        const object = record.split('\t')[0]!.split(' ')[revision === ':' ? 1 : 2]!;
+        const destination = await this.patch(file, base, undefined, git, context);
+        const part = parsePatch(destination).find(part => part.newFileName === `b/${file}`);
+        const pointer = part?.hunks.flatMap(hunk => hunk.lines).find(line => line.startsWith('+Subproject commit '));
+        if (!pointer) throw new Error('Rename changed while loading. Refresh to review it.');
+        return formatPatch(structuredPatch(`a/${originalPath}`, `b/${file}`, `Subproject commit ${object}\n`, `${pointer.slice(1)}\n`, '', '', { context }));
       }
     }
     // Preserve the context prefix on blank lines so parsing advances both line counters.
-    const patch = await git.raw(['-c', 'diff.suppressBlankEmpty=false', 'diff', ...revisions, '--no-ext-diff', '--no-textconv', '--no-color', renames, '--src-prefix=a/', '--dst-prefix=b/', '--submodule=short', `--unified=${context}`, ...(this.ignoreWhitespace ? ['--ignore-all-space'] : []), '--', ...paths]);
-    if (!selectPair) return patch;
-    // Isolate the gitlink before the per-file size check. Parse only section
-    // headers so unrelated large hunks are never expanded into patch objects.
-    for (const section of patch.split(/(?=^diff --(?:git|cc|combined) )/m)) {
-      if (!section.startsWith('diff --git ')) continue;
-      const hunk = section.indexOf('\n@@');
-      const [part] = parsePatch(hunk < 0 ? section : section.slice(0, hunk));
-      if (part?.oldFileName === `a/${originalPath}` && part.newFileName === `b/${file}`) return section;
-    }
-    throw new Error('Rename changed while loading. Refresh to review it.');
+    return git.raw(['-c', 'diff.suppressBlankEmpty=false', 'diff', ...revisions, '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', '--submodule=short', `--unified=${context}`, ...(this.ignoreWhitespace ? ['--ignore-all-space'] : []), '--', ...paths]);
   }
 
   private async file(file: string, status: string, base: string[], recreated = false, originalPath?: string, renamePatch?: string): Promise<ReviewFile | undefined> {
-    const result: ReviewFile = { path: file, originalPath, status, additions: 0, deletions: 0, hunks: [], snapshot: randomUUID(), gaps: [] };
+    const result: ReviewFile = { path: file, originalPath, canOpen: false, status, additions: 0, deletions: 0, hunks: [], snapshot: randomUUID(), gaps: [] };
     try {
       let hunks: StructuredPatchHunk[];
       let original: string | undefined;
@@ -176,7 +239,7 @@ export class GitReview {
         if (Buffer.byteLength(original) > MAX_BYTES) return { ...result, notice: 'Original file exceeds the 2 MB preview limit. Open it in the editor to review.' };
         if (original.includes('\0')) return { ...result, notice: 'Binary file — no text preview.' };
         if (recreated) {
-          // Compare the HEAD blob directly with the working file so Git applies its attributes and clean filters.
+          // Compare the base blob directly with the working file so Git applies its attributes and clean filters.
           const patch = await this.patch(file, [`${base[0] ?? 'HEAD'}:${file}`]);
           if (Buffer.byteLength(patch) > MAX_BYTES) return { ...result, notice: 'Diff exceeds the 2 MB preview limit. Open it in the editor to review.' };
           const parts = parsePatch(patch);
@@ -208,7 +271,7 @@ export class GitReview {
       }
       if (status === 'U') result.notice = 'Unresolved merge conflict. Resolve the conflict in the editor before completing your review.';
       else if (status !== 'A' && status !== '?' && status !== 'T' && result.hunks.length && !result.hunks.some(hunk => hunk.lines.some(line => line.text.startsWith('Subproject commit ')))) {
-        const revision = base.length === 0 ? ':' : base[0] === '--cached' ? 'HEAD:' : `${base[0] ?? 'HEAD'}:`;
+        const revision = base.length === 0 ? ':' : base[0] === '--cached' ? `${base[1] ?? 'HEAD'}:` : `${base[0] ?? 'HEAD'}:`;
         original ??= await this.git.show([`${revision}${originalPath ?? file}`]);
         if (Buffer.byteLength(original) <= MAX_BYTES) {
           const source = original === '' ? [] : original.split('\n');

@@ -1,17 +1,23 @@
 import { memo, useState, type RefObject } from 'react';
 import { Moon, Search, Sun, WrapText } from 'lucide-react';
-import type { ReviewState, Scope } from '../model';
+import { sameComparison, type ReviewState } from '../model';
 import { Button, FileStatus } from './ui';
 
-const scopes = ['uncommitted', 'staged', 'unstaged'] as const;
-const scopeDescriptions: Record<Scope, string> = {
-  uncommitted: 'HEAD → working tree\nAll local changes, including untracked files.',
-  staged: 'HEAD → index\nChanges ready for your next commit.',
-  unstaged: 'Index → working tree\nChanges that haven’t been staged, including untracked files.',
-};
+function ComparisonInput({ baseRef, endRef, busy, onApply }: { baseRef: string; endRef: string; busy: boolean; onApply: (base: string, end: string) => void }) {
+  const [base, setBase] = useState(baseRef);
+  const [end, setEnd] = useState(endRef);
+  return <form className="comparison-input" onSubmit={event => { event.preventDefault(); if (base.trim() && end.trim()) onApply(base.trim(), end.trim()); }}>
+    <input aria-label="Base ref" title="Branch, tag, commit hash, revision, INDEX, or WORKING" placeholder="Base ref" value={base} disabled={busy} autoComplete="off" spellCheck={false} maxLength={1024} required
+      onChange={event => setBase(event.target.value)} />
+    <span aria-label="to">→</span>
+    <input aria-label="End ref" title="Branch, tag, commit hash, revision, INDEX, or WORKING" placeholder="End ref" value={end} disabled={busy} autoComplete="off" spellCheck={false} maxLength={1024} required
+      onChange={event => setEnd(event.target.value)} />
+    <Button type="submit" disabled={busy || !base.trim() || !end.trim() || base.trim() === baseRef && end.trim() === endRef}>Apply</Button>
+  </form>;
+}
 
 export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, commentsOpen, filesOpen, searchCount, hasMatches, queryRef, theme, focused,
-  onScope, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onIgnoreWhitespace, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
+  onComparison, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onIgnoreWhitespace, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
   review: ReviewState;
   busy: boolean;
   query: string;
@@ -26,7 +32,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
   theme: 'light' | 'dark';
   focused: boolean;
   onTheme: () => void;
-  onScope: (scope: Scope) => void;
+  onComparison: (base: string, end: string) => void;
   onRepository: (root: string) => void;
   onQuery: (query: string) => void;
   onRegex: () => void;
@@ -41,13 +47,13 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
   onEscape: () => void;
 }) {
   return <div className="toolbar">
-    <Button id="toggle-files" aria-expanded={filesOpen} onClick={onFiles}>Files</Button>
-    <select id="repository" aria-label="Repository" title="Select repository" hidden={review.repositories.length < 2} disabled={busy} value={review.repository} onChange={event => onRepository(event.target.value)}>
-      {review.repositories.map(repo => <option key={repo.root} value={repo.root} title={repo.root}>{repo.name}</option>)}
-    </select>
-    <div id="scopes" className="segments" aria-label="Change scope">
-      {scopes.map(scope => <Button key={scope} data-scope={scope} title={scopeDescriptions[scope]} className={scope === review.scope ? 'selected' : ''} aria-pressed={scope === review.scope} disabled={busy} onClick={() => onScope(scope)}>{scope.charAt(0).toUpperCase() + scope.slice(1)}</Button>)}
+    <div className="review-selection">
+      <select id="repository" aria-label="Repository" title="Select repository" hidden={review.repositories.length < 2} disabled={busy} value={review.repository} onChange={event => onRepository(event.target.value)}>
+        {review.repositories.map(repo => <option key={repo.root} value={repo.root} title={repo.root}>{repo.name}</option>)}
+      </select>
+      <ComparisonInput key={JSON.stringify([review.repository, review.baseRef, review.endRef])} baseRef={review.baseRef} endRef={review.endRef} busy={busy} onApply={onComparison} />
     </div>
+    <Button id="toggle-files" aria-expanded={filesOpen} onClick={onFiles}>Files</Button>
     <div className="search" role="search">
       <Search className="search-icon" size={16} aria-hidden="true" />
       <input id="query" ref={queryRef} placeholder="Find…" aria-label="Find in diff" title="Search currently loaded diff lines. Expand context to include more." autoComplete="off" spellCheck={false} value={query}
@@ -89,7 +95,7 @@ export const FilesPane = memo(function FilesPane({ review, activePath, jump, fil
     <nav id="files">
       {files.map(file => {
         const slash = file.path.lastIndexOf('/');
-        const count = review.comments.filter(comment => comment.path === file.path && comment.scope === review.scope).length;
+        const count = review.comments.filter(comment => comment.path === file.path && sameComparison(comment, review)).length;
         return <Button key={file.path} title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path} data-path={file.path} className={`file-link${file.path === activePath ? ' active' : ''}`} aria-current={file.path === activePath} onClick={() => jump(file.path)}>
           <FileStatus status={file.status} />
           <span className="file-name"><span className="basename">{file.path.slice(slash + 1)}</span>{slash >= 0 && <span className="directory">{file.path.slice(0, slash)}</span>}{file.originalPath && <span className="directory">from {file.originalPath}</span>}</span>

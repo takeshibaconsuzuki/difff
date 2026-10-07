@@ -1,4 +1,4 @@
-import type { ClientMessage, DiffLine, Scope, Side } from '../model';
+import type { ClientMessage, DiffLine, Side } from '../model';
 
 export interface Draft {
   repository: string;
@@ -6,14 +6,16 @@ export interface Draft {
   side: Side;
   line: number;
   code: string;
-  scope: Scope;
+  baseRef: string;
+  endRef: string;
   body: string;
   id?: string;
 }
 
 export interface LocalState {
   draft?: Draft;
-  scope?: Scope;
+  baseRef?: string;
+  endRef?: string;
   repository?: string;
   query?: string;
   regex?: boolean;

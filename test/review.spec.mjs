@@ -6,7 +6,7 @@ const css = await readFile(new URL('../dist/review.css', import.meta.url), 'utf8
 const js = await readFile(new URL('../dist/review.js', import.meta.url), 'utf8');
 const contextBundle = (await build({ entryPoints: ['src/context.ts'], bundle: true, platform: 'browser', format: 'iife', globalName: 'ContextAPI', write: false })).outputFiles[0].text;
 const file = {
-  path: 'src/review.ts', status: 'M', additions: 2, deletions: 1, snapshot: 'fixture',
+  path: 'src/review.ts', status: 'M', canOpen: true, additions: 2, deletions: 1, snapshot: 'fixture',
   gaps: [{ id: '1:1:17', before: 0, oldStart: 1, newStart: 1, count: 17 }, { id: '21:22:30', before: 1, oldStart: 21, newStart: 22, count: 30 }],
   hunks: [{ header: '@@ −18,3 +18,4 @@', oldStart: 18, oldLines: 3, newStart: 18, newLines: 4, lines: [
     { kind: 'context', text: 'export async function loadReview(scope: Scope) {', oldLine: 18, newLine: 18 },
@@ -17,9 +17,9 @@ const file = {
   ] }],
 };
 const seed = {
-  repositories: [{ root: '/workspace/difff', name: 'difff' }], repository: '/workspace/difff', branch: 'feature/local-review', scope: 'uncommitted', ignoreWhitespace: true,
+  repositories: [{ root: '/workspace/difff', name: 'difff' }], repository: '/workspace/difff', branch: 'feature/local-review', baseRef: 'HEAD', endRef: 'WORKING', ignoreWhitespace: true,
   files: [file, { ...file, path: 'src/components/toolbar.ts', status: 'A', additions: 4, deletions: 0 }, { ...file, path: 'README.md', additions: 2, deletions: 1 }],
-  comments: [{ id: 'existing', repository: '/workspace/difff', path: 'src/review.ts', line: 19, side: 'new', code: '  const files = await git.diff(scope);', scope: 'uncommitted', body: 'Could we keep untracked files in this view too? It would make the full review easier to follow.', createdAt: '2026-01-01' }],
+  comments: [{ id: 'existing', repository: '/workspace/difff', path: 'src/review.ts', line: 19, side: 'new', code: '  const files = await git.diff(scope);', baseRef: 'HEAD', endRef: 'WORKING', body: 'Could we keep untracked files in this view too? It would make the full review easier to follow.', createdAt: '2026-01-01' }],
 };
 
 async function mount(page, initial = seed) {
@@ -51,10 +51,13 @@ async function mount(page, initial = seed) {
         if (window.heldTypes?.includes(message.type)) return;
         const state = window.reviewState;
         const emit = value => window.postMessage(value, '*');
-        if (message.type === 'ready' && message.scope) state.scope = message.scope;
+        if (message.type === 'ready' || message.type === 'comparison') {
+          state.baseRef = message.baseRef ?? state.baseRef;
+          state.endRef = message.endRef ?? state.endRef;
+        }
         if (message.type === 'ready' && message.repository) state.repository = message.repository;
         if (message.type === 'ready' || message.type === 'ignoreWhitespace') state.ignoreWhitespace = message.ignoreWhitespace ?? true;
-        if (message.type === 'scope') { state.scope = message.scope; state.files = initial.scopeFiles?.[message.scope] ?? state.files; }
+        if (message.type === 'comparison') state.files = initial.comparisonFiles?.[`${message.baseRef}:${message.endRef}`] ?? state.files;
         if (message.type === 'repository') state.repository = message.root;
         if (message.type === 'comment') {
           state.comments.push({ ...message, id: 'new-comment', repository: state.repository, createdAt: '2026-01-02' });
@@ -68,7 +71,13 @@ async function mount(page, initial = seed) {
           state.files[index] = message.type === 'expand' ? window.ContextAPI.expandContext(file, sources[file.path], message.gap, message.direction) : window.ContextAPI.expandAllContext(file, sources[file.path]);
         }
         if (message.type === 'copy') emit({ type: 'notice', text: `${state.comments.length} comments copied with source locations.` });
-        if (message.type === 'jump') emit({ type: 'reveal', comment: state.comments.find(comment => comment.id === message.id) });
+        if (message.type === 'jump') {
+          const comment = state.comments.find(comment => comment.id === message.id);
+          state.baseRef = comment.baseRef; state.endRef = comment.endRef;
+          emit({ type: 'state', state });
+          emit({ type: 'reveal', comment });
+          emit({ type: 'busy', busy: false });
+        }
         else { emit({ type: 'state', state }); emit({ type: 'busy', busy: false }); }
         if (message.type === 'comment' || message.type === 'edit') emit({ type: 'saved' });
       },
@@ -80,6 +89,13 @@ async function mount(page, initial = seed) {
   return errors;
 }
 
+async function setComparison(page, baseRef, endRef) {
+  await page.getByRole('textbox', { name: 'Base ref', exact: true }).fill(baseRef);
+  await page.getByRole('textbox', { name: 'End ref', exact: true }).fill(endRef);
+  const apply = page.getByRole('button', { name: 'Apply', exact: true });
+  if (await apply.isEnabled()) await apply.click();
+}
+
 test('ignore whitespace defaults on, persists through reloads, and protects drafts', async ({ page }) => {
   await mount(page);
   const toggle = page.getByRole('button', { name: 'Ignore whitespace', exact: true });
@@ -88,7 +104,7 @@ test('ignore whitespace defaults on, persists through reloads, and protects draf
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-pressed', 'false');
   expect(await page.evaluate(() => window.messages.filter(message => message.type === 'ignoreWhitespace').at(-1))).toEqual({ type: 'ignoreWhitespace', ignoreWhitespace: false });
-  await page.locator('[data-scope="staged"]').click();
+  await setComparison(page, 'HEAD', 'INDEX');
   await page.getByRole('button', { name: 'Refresh changes' }).click();
   await page.reload();
   await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'false');
@@ -121,9 +137,9 @@ test('whitespace switching waits for matching state and shows why a review is em
     window.heldTypes = [];
     window.postMessage({ type: 'state', state: window.reviewState }, '*');
   });
-  await expect(page.locator('.diff-empty')).toHaveText('No uncommitted changes.');
+  await expect(page.locator('.diff-empty')).toHaveText('No changes for HEAD → WORKING.');
   await toggle.click();
-  await expect(page.locator('.diff-empty')).toHaveText('No uncommitted changes with whitespace ignored.');
+  await expect(page.locator('.diff-empty')).toHaveText('No changes for HEAD → WORKING with whitespace ignored.');
 });
 
 test('comments on either spelling of ignored context remain anchored', async ({ page }) => {
@@ -145,17 +161,17 @@ test('comments on either spelling of ignored context remain anchored', async ({ 
 for (const trigger of ['scope button', 'comment jump']) {
   test(`${trigger} immediately clears all views during a scope switch and ignores late state`, async ({ page }) => {
     const data = structuredClone(seed);
-    data.comments[0].scope = 'staged';
+    data.comments[0].baseRef = 'HEAD'; data.comments[0].endRef = 'INDEX';
     await mount(page, data);
     await page.getByRole('textbox', { name: 'Filter files' }).fill('review');
     await page.getByRole('textbox', { name: 'Find in diff' }).fill('git');
     await expect(page.locator('mark')).not.toHaveCount(0);
-    await page.evaluate(() => { window.heldTypes = ['scope', 'jump']; });
-    if (trigger === 'scope button') await page.locator('[data-scope="staged"]').click();
+    await page.evaluate(() => { window.heldTypes = ['comparison', 'jump']; });
+    if (trigger === 'scope button') await setComparison(page, 'HEAD', 'INDEX');
     else await page.locator('.comment-card').getByRole('button', { name: 'Jump to comment' }).click();
 
     await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'true');
-    await expect(page.locator('[data-scope="staged"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('textbox', { name: 'End ref', exact: true })).toHaveValue('INDEX');
     await expect(page.locator('.file-link, .file-card, .comment-card, .add-comment, mark')).toHaveCount(0);
     await expect(page.locator('.diff-empty, .comments-empty')).toHaveCount(0);
     await expect(page.getByRole('textbox', { name: 'Filter files' })).toHaveValue('');
@@ -169,14 +185,14 @@ for (const trigger of ['scope button', 'comment jump']) {
       window.postMessage({ type: 'busy', busy: false }, '*');
     });
     await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'true');
-    await expect(page.locator('[data-scope="staged"]')).toBeDisabled();
+    await expect(page.getByRole('textbox', { name: 'End ref', exact: true })).toBeDisabled();
     await expect(page.locator('.file-link, .file-card, .comment-card')).toHaveCount(0);
     await expect(page.locator('#notice')).toBeHidden();
     expect(await page.evaluate(() => window.localState.draft)).toBeUndefined();
 
     await page.evaluate(trigger => {
       const state = window.reviewState;
-      state.scope = 'staged';
+      state.baseRef = 'HEAD'; state.endRef = 'INDEX';
       state.files = [state.files[0]];
       window.postMessage({ type: 'state', state }, '*');
       if (trigger === 'comment jump') window.postMessage({ type: 'reveal', comment: state.comments[0] }, '*');
@@ -188,7 +204,7 @@ for (const trigger of ['scope button', 'comment jump']) {
     await expect(page.locator('.comment-card')).toHaveCount(1);
     if (trigger === 'comment jump') await expect(page.locator('.diff-line.flash')).toHaveCount(1);
     await page.getByRole('button', { name: 'Comment on src/review.ts:20', exact: true }).click();
-    await expect.poll(() => page.evaluate(() => window.localState.draft?.scope)).toBe('staged');
+    await expect.poll(() => page.evaluate(() => window.localState.draft?.endRef)).toBe('INDEX');
   });
 }
 
@@ -196,13 +212,13 @@ test('file arrows open existing and conflicted files but are absent on deleted f
   const data = structuredClone(seed);
   data.files = [
     { ...file, path: 'existing.txt' },
-    { ...file, path: 'deleted.txt', status: 'D' },
+    { ...file, path: 'deleted.txt', status: 'D', canOpen: false },
     { ...file, path: 'conflicted.txt', status: 'U' },
   ];
   data.comments = [];
   await mount(page, data);
-  for (const scope of ['uncommitted', 'staged', 'unstaged']) {
-    await page.locator(`[data-scope="${scope}"]`).click();
+  for (const scope of ['compare', 'staged', 'unstaged']) {
+    await setComparison(page, scope === 'unstaged' ? 'INDEX' : 'HEAD', scope === 'staged' ? 'INDEX' : 'WORKING');
     await expect(page.locator('#diff')).toHaveAttribute('aria-busy', 'false');
     await expect(page.locator('.file-card[data-path="deleted.txt"] .open-file')).toHaveCount(0);
     for (const path of ['existing.txt', 'conflicted.txt']) {
@@ -361,8 +377,8 @@ test('line comments support create, edit, jump, copy, delete, and clear', async 
 
 test('scopes, regex search, context, and file navigation are wired', async ({ page }) => {
   await mount(page);
-  await page.locator('[data-scope="staged"]').click();
-  await expect(page.locator('[data-scope="staged"]')).toHaveAttribute('aria-pressed', 'true');
+  await setComparison(page, 'HEAD', 'INDEX');
+  await expect(page.getByRole('textbox', { name: 'End ref', exact: true })).toHaveValue('INDEX');
   await page.getByRole('textbox', { name: 'Find in diff' }).fill('git\\.diff\\(scope\\)');
   await page.getByRole('button', { name: 'Use regular expression' }).click();
   await expect(page.locator('#search-count')).toHaveText('1/3');
@@ -487,14 +503,14 @@ test('incoming context updates preserve the active draft cursor and horizontal s
 
 test('a draft and its scope survive a webview reload and save once', async ({ page }) => {
   const errors = await mount(page);
-  await page.locator('[data-scope="staged"]').click();
-  await expect(page.locator('[data-scope="staged"]')).toHaveAttribute('aria-pressed', 'true');
+  await setComparison(page, 'HEAD', 'INDEX');
+  await expect(page.getByRole('textbox', { name: 'End ref', exact: true })).toHaveValue('INDEX');
   await page.getByRole('button', { name: 'Comment on src/review.ts:20', exact: true }).click();
   await page.getByRole('textbox', { name: 'Write a comment' }).fill('Resume this staged review.');
   await expect.poll(() => page.evaluate(() => window.localState.draft?.body)).toBe('Resume this staged review.');
   await page.reload();
   await expect(page.getByRole('main', { name: 'Diff review' })).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('[data-scope="staged"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('textbox', { name: 'End ref', exact: true })).toHaveValue('INDEX');
   await expect(page.getByRole('textbox', { name: 'Write a comment' })).toHaveValue('Resume this staged review.');
   await page.getByRole('textbox', { name: 'Write a comment' }).press('Control+Enter');
   await expect(page.locator('.inline-comment')).toContainText('Resume this staged review.');
@@ -586,12 +602,12 @@ test('context buttons reveal only their gap and disappear at file boundaries', a
 test('the file header stays fixed when switching to an empty scope and badges and search icons are centered', async ({ page }, testInfo) => {
   const data = structuredClone(seed);
   data.files = Array.from({ length: 70 }, (_, i) => ({ ...file, path: `src/part-${i}.ts` }));
-  data.scopeFiles = { staged: [] };
+  data.comparisonFiles = { 'HEAD:INDEX': [] };
   await mount(page, data);
   const heading = page.locator('.files-pane .pane-heading');
   const beforeHeading = await heading.boundingBox();
   const beforeFilter = await page.locator('#file-filter').boundingBox();
-  await page.locator('[data-scope="staged"]').click();
+  await setComparison(page, 'HEAD', 'INDEX');
   await expect(page.locator('#file-count')).toHaveText('0');
   expect(await heading.boundingBox()).toEqual(beforeHeading);
   expect(await page.locator('#file-filter').boundingBox()).toEqual(beforeFilter);
@@ -986,10 +1002,10 @@ test('draft reminders reveal and pulse the open saved comment or unsaved draft i
   await page.getByRole('button', { name: 'Cancel comment' }).click();
   await page.getByRole('button', { name: 'Comment on part-17.ts:20', exact: true }).click();
   await page.getByRole('textbox', { name: 'Write a comment' }).fill('New draft.');
-  await page.locator('[data-scope="staged"]').click();
+  await setComparison(page, 'HEAD', 'INDEX');
   await expect(page.locator('.draft-card')).toHaveClass(/draft-warning/);
   await expect(page.locator('.draft-card')).toContainText('New draft.');
-  await expect(page.locator('[data-scope="uncommitted"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('textbox', { name: 'Base ref', exact: true })).toHaveValue('HEAD');
   await page.locator('.draft-card').getByRole('button', { name: 'Return to draft' }).click();
   await expect(page.getByRole('textbox', { name: 'Write a comment' })).toBeFocused();
 });
@@ -1101,4 +1117,52 @@ test('clicking a partially clipped file reveals it immediately without waiting f
   expect(after.y).toBeGreaterThanOrEqual(pane.y);
   expect(after.y + after.height).toBeLessThanOrEqual(pane.y + pane.height + 1);
   await expect(target).toBeFocused();
+});
+
+
+test('comparison inputs accept commits, persist, and protect drafts', async ({ page }) => {
+  await mount(page);
+  await expect(page.locator('#scopes')).toHaveCount(0);
+  const input = page.getByRole('textbox', { name: 'Base ref', exact: true });
+  await expect(input).toHaveValue('HEAD');
+  const end = page.getByRole('textbox', { name: 'End ref', exact: true });
+  await expect(end).toHaveValue('WORKING');
+  await end.fill('HEAD');
+  await input.fill('abc1234');
+  await input.press('Enter');
+  await expect.poll(() => page.evaluate(() => window.reviewState.baseRef)).toBe('abc1234');
+  await page.reload();
+  await expect(input).toHaveValue('abc1234');
+  await expect(end).toHaveValue('HEAD');
+  await page.locator('.add-comment').first().click();
+  await page.getByRole('textbox', { name: 'Write a comment' }).fill('Ref-specific comment');
+  await input.fill('HEAD~3');
+  await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect(page.locator('#notice')).toContainText('Save or cancel your draft');
+  expect(await page.evaluate(() => window.reviewState.baseRef)).toBe('abc1234');
+  await page.getByRole('button', { name: 'Save comment', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.reviewState.comments.at(-1).baseRef)).toBe('abc1234');
+  await page.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.reviewState.baseRef)).toBe('HEAD~3');
+  await expect(page.locator('.inline-comment')).toHaveCount(0);
+});
+
+
+test('editor arrows depend on working-file availability rather than diff status', async ({ page }) => {
+  const data = structuredClone(seed);
+  data.baseRef = 'WORKING';
+  data.endRef = 'HEAD';
+  data.files = [
+    { ...file, path: 'old.txt', originalPath: 'new.txt', status: 'R', canOpen: false },
+    { ...file, path: 'modified.txt', canOpen: true },
+    { ...file, path: 'historical.txt', status: 'A', canOpen: false },
+    { ...file, path: 'present.txt', status: 'D', canOpen: true },
+  ];
+  data.comments = [];
+  await mount(page, data);
+  await expect(page.locator('.file-card[data-path="old.txt"] .open-file')).toHaveCount(0);
+  await expect(page.locator('.file-card[data-path="historical.txt"] .open-file')).toHaveCount(0);
+  await expect(page.locator('.file-card[data-path="present.txt"] .open-file')).toHaveCount(1);
+  await page.locator('.file-card[data-path="modified.txt"] .open-file').click();
+  expect(await page.evaluate(() => window.messages.filter(message => message.type === 'open').at(-1))).toEqual({ type: 'open', path: 'modified.txt', line: 1 });
 });
