@@ -11,7 +11,7 @@ await build({ entryPoints: ['src/git.ts', 'src/git-renames.ts', 'src/model.ts', 
 const require = createRequire(import.meta.url);
 const { GitReview } = require('../.tools/tests/git.js');
 const { withUntrackedComparison } = require('../.tools/tests/git-renames.js');
-const { findAnchor, formatComments } = require('../.tools/tests/model.js');
+const { findAnchor, formatComments, sourceLabel } = require('../.tools/tests/model.js');
 const { messageSchema } = require('../.tools/tests/validation.js');
 const temporary = [];
 const comparisons = { staged: ['HEAD', 'INDEX'], unstaged: ['INDEX', 'WORKING'], uncommitted: ['HEAD', 'WORKING'] };
@@ -1162,7 +1162,16 @@ test('comparisons between refs and local endpoints start at the merge base with 
     const [backward] = await review.files(end, 'other');
     assert.equal(findAnchor(backward, 'old', 1).text, local, end);
     assert.equal(findAnchor(backward, 'new', 1).text, 'base', end);
+    // Comment labels must name the revision the diff actually shows on the ref side.
+    assert.equal(sourceLabel({ side: 'old', baseRef: 'other', endRef: end }), 'merge base of other and HEAD');
+    assert.equal(sourceLabel({ side: 'new', baseRef: 'other', endRef: end }), end);
+    assert.equal(sourceLabel({ side: 'new', baseRef: end, endRef: 'other' }), 'merge base of other and HEAD');
+    assert.equal(sourceLabel({ side: 'old', baseRef: end, endRef: 'other' }), end);
+    assert.equal(sourceLabel({ side: 'old', baseRef: 'HEAD', endRef: end }), 'HEAD');
   }
+  assert.equal(sourceLabel({ side: 'old', baseRef: 'INDEX', endRef: 'WORKING' }), 'INDEX');
+  assert.equal(sourceLabel({ side: 'old', baseRef: 'other', endRef: 'HEAD' }), 'merge base of other and HEAD');
+  assert.equal(sourceLabel({ side: 'new', baseRef: 'other', endRef: 'HEAD' }), 'HEAD');
 });
 
 

@@ -84,9 +84,12 @@ export function sameComparison(a: Comparison, b: Comparison): boolean {
 }
 
 export function sourceLabel(comment: Pick<ReviewComment, 'side' | 'baseRef' | 'endRef'>): string {
-  if (comment.side === 'new') return comment.endRef;
-  if ([INDEX, WORKING].includes(comment.baseRef) || [INDEX, WORKING].includes(comment.endRef)) return comment.baseRef;
-  return `merge base of ${comment.baseRef} and ${comment.endRef}`;
+  const local = (ref: string) => ref === INDEX || ref === WORKING;
+  const [ref, other] = comment.side === 'new' ? [comment.endRef, comment.baseRef] : [comment.baseRef, comment.endRef];
+  if (local(ref)) return ref;
+  // Local endpoints build on HEAD, so a ref compared against them is diffed from its merge base with HEAD.
+  if (local(other)) return ref === 'HEAD' ? ref : `merge base of ${ref} and HEAD`;
+  return comment.side === 'new' ? ref : `merge base of ${comment.baseRef} and ${comment.endRef}`;
 }
 
 export function formatComments(comments: ReviewComment[]): string {
