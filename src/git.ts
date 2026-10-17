@@ -65,16 +65,21 @@ export class GitReview {
     return head.trim() || createHash(format === 'sha256' ? 'sha256' : 'sha1').update('tree 0\0').digest('hex');
   }
 
-  private async baseArgs(baseRef: string, endRef: string): Promise<string[]> {
-    if (baseRef === INDEX) return [];
-    if (endRef === INDEX || endRef === WORKING) {
-      const start = baseRef === 'HEAD' ? await this.headOrEmptyTree() : await this.commit(baseRef);
-      return endRef === INDEX ? ['--cached', start] : [start];
-    }
+  private async mergeBase(baseRef: string, endRef: string): Promise<[string, string]> {
     const [start, finish] = await Promise.all([this.commit(baseRef), this.commit(endRef)]);
     const bases = (await this.git.raw(['merge-base', '--all', start, finish]).catch(() => { throw new Error(`No merge base found for "${baseRef}" and "${endRef}".`); })).trim().split('\n');
     if (bases.length !== 1) throw new Error('Multiple merge bases found. Choose a more specific base ref.');
     return [bases[0]!, finish];
+  }
+
+  private async baseArgs(baseRef: string, endRef: string): Promise<string[]> {
+    if (baseRef === INDEX) return [];
+    if (endRef === INDEX || endRef === WORKING) {
+      // Local endpoints build on HEAD, so other refs start where they meet HEAD's history.
+      const start = baseRef === 'HEAD' ? await this.headOrEmptyTree() : (await this.mergeBase(baseRef, 'HEAD'))[0];
+      return endRef === INDEX ? ['--cached', start] : [start];
+    }
+    return this.mergeBase(baseRef, endRef);
   }
 
   async files(baseRef = 'HEAD', endRef = WORKING): Promise<ReviewFile[]> {

@@ -1138,7 +1138,7 @@ test('INDEX and WORKING comparisons work in both directions with anchors and exp
   assert.deepEqual(await review.files('WORKING', 'WORKING'), []);
 });
 
-test('comparisons involving local endpoints use the selected ref directly', async () => {
+test('comparisons between refs and local endpoints start at the merge base with HEAD', async () => {
   const { directory, git, review } = await repository();
   await writeFile(path.join(directory, 'review.txt'), 'base\n');
   await git.add('.');
@@ -1146,6 +1146,7 @@ test('comparisons involving local endpoints use the selected ref directly', asyn
   const base = (await git.revparse(['HEAD'])).trim();
   await git.checkoutLocalBranch('other');
   await writeFile(path.join(directory, 'review.txt'), 'other branch\n');
+  await writeFile(path.join(directory, 'other.txt'), 'only on other\n');
   await git.add('.');
   await git.commit('other');
   await git.checkout(['-b', 'feature', base]);
@@ -1153,9 +1154,14 @@ test('comparisons involving local endpoints use the selected ref directly', asyn
   await git.add('.');
   await writeFile(path.join(directory, 'review.txt'), 'working\n');
   for (const end of ['INDEX', 'WORKING']) {
-    const [file] = await review.files('other', end);
-    assert.equal(findAnchor(file, 'old', 1).text, 'other branch');
-    assert.equal(findAnchor(file, 'new', 1).text, end === 'INDEX' ? 'staged' : 'working');
+    const local = end === 'INDEX' ? 'staged' : 'working';
+    const [file, ...rest] = await review.files('other', end);
+    assert.deepEqual(rest, [], end);
+    assert.equal(findAnchor(file, 'old', 1).text, 'base', end);
+    assert.equal(findAnchor(file, 'new', 1).text, local, end);
+    const [backward] = await review.files(end, 'other');
+    assert.equal(findAnchor(backward, 'old', 1).text, local, end);
+    assert.equal(findAnchor(backward, 'new', 1).text, 'base', end);
   }
 });
 

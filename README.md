@@ -16,7 +16,7 @@ Enter the two endpoints and press Enter or **Apply**. Both inputs accept branche
 | Last commit | `HEAD^` | `HEAD` |
 | Branch changes since the merge base | `main` | `HEAD` |
 
-Two commit refs use Git's three-dot semantics: changes from their merge base to the end ref. Comparisons involving `INDEX` or `WORKING` compare the endpoints directly. `WORKING` includes untracked files. Reversing the endpoints reverses local comparisons; for example, `WORKING ? INDEX` shows what would change when returning to the staged contents.
+Two commit refs use Git's three-dot semantics: changes from their merge base to the end ref. Comparisons between a ref and `INDEX` or `WORKING` start at the merge base of the ref and `HEAD`, so `main` → `WORKING` shows your branch's commits plus local edits, without changes made on `main` since you branched. `WORKING` includes untracked files. Reversing the endpoints reverses local comparisons; for example, `WORKING ? INDEX` shows what would change when returning to the staged contents.
 
 ## Review changes
 
