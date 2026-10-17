@@ -2,6 +2,7 @@ import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
+import { gitEnvironment } from './git-environment';
 
 // Compare only unmatched deletions and untracked files. Both the index and newly
 // written Git objects belong to this comparison, never to the user's repository.
@@ -43,10 +44,13 @@ export async function withUntrackedComparison<T>(git: SimpleGit, root: string, b
       allowEnvironment: ['GIT_LITERAL_PATHSPECS', 'GIT_OPTIONAL_LOCKS', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'],
       input: commands => commands.includes('--index-info') ? sources : commands.includes('--pathspec-from-file=-') ? `${candidates.join('\0')}\0` : undefined,
     });
-    comparison.env('GIT_LITERAL_PATHSPECS', '1').env('GIT_OPTIONAL_LOCKS', '0')
-      .env('GIT_INDEX_FILE', path.join(directory, 'index'))
-      .env('GIT_OBJECT_DIRECTORY', objects)
-      .env('GIT_ALTERNATE_OBJECT_DIRECTORIES', JSON.stringify(repositoryObjects));
+    comparison.env(gitEnvironment({
+      GIT_LITERAL_PATHSPECS: '1',
+      GIT_OPTIONAL_LOCKS: '0',
+      GIT_INDEX_FILE: path.join(directory, 'index'),
+      GIT_OBJECT_DIRECTORY: objects,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(repositoryObjects),
+    }));
 
     await comparison.raw(['update-index', '-z', '--index-info']);
     const tree = (await comparison.raw(['write-tree'])).trim();

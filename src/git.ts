@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { formatPatch, parsePatch, reversePatch, structuredPatch, type StructuredPatchHunk } from 'diff';
 import { simpleGit, type SimpleGit } from 'simple-git';
+import { gitEnvironment } from './git-environment';
 import { WORKING, INDEX, type DiffLine, type Hunk, type ReviewFile, type Side } from './model';
 import { contextGaps, expandAllContext, expandContext, header, revealContextLine, type ContextSource } from './context';
 import { withUntrackedComparison } from './git-renames';
@@ -46,7 +47,7 @@ export class GitReview {
   constructor(readonly root: string, private readonly ignoreWhitespace = true) {
     this.git = simpleGit({ baseDir: root, maxConcurrentProcesses: 4, timeout: { block: 30000 }, allowEnvironment: ['GIT_LITERAL_PATHSPECS', 'GIT_OPTIONAL_LOCKS'] });
     // Paths are passed as separate argv entries; literal pathspecs also handle [] and leading colons.
-    this.git.env('GIT_LITERAL_PATHSPECS', '1').env('GIT_OPTIONAL_LOCKS', '0');
+    this.git.env(gitEnvironment({ GIT_LITERAL_PATHSPECS: '1', GIT_OPTIONAL_LOCKS: '0' }));
   }
 
   async branch(): Promise<string> {
