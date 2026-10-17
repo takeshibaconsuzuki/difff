@@ -51,6 +51,7 @@ class ReviewPanel implements vscode.Disposable {
           finally { this.send({ type: 'busy', busy: false }); }
         });
       }),
+      vscode.window.tabGroups.onDidChangeTabGroups(() => { this.sendLayout(); }),
       this.panel.onDidDispose(() => {
         this.closed = true;
         this.disposables.forEach(disposable => { disposable.dispose(); });
@@ -129,6 +130,9 @@ class ReviewPanel implements vscode.Disposable {
     this.publish();
   }
 
+  // Maximizing only applies to split layouts: with one group the review already fills the editor area.
+  private sendLayout(): void { this.send({ type: 'layout', canMaximize: vscode.window.tabGroups.all.length > 1 }); }
+
   private async handle(message: ClientMessage): Promise<void> {
     const git = () => this.gitReview ?? new GitReview(this.state.repository, this.state.ignoreWhitespace);
     const comment = 'id' in message ? this.comments.find(item => item.id === message.id && item.repository === this.state.repository) : undefined;
@@ -138,6 +142,7 @@ class ReviewPanel implements vscode.Disposable {
         this.state.endRef = message.endRef ?? WORKING;
         this.state.repository = message.repository ?? '';
         this.state.ignoreWhitespace = message.ignoreWhitespace ?? true;
+        this.sendLayout();
         await this.refresh(true);
         break;
       case 'ignoreWhitespace':
@@ -194,6 +199,7 @@ class ReviewPanel implements vscode.Disposable {
         this.send({ type: 'notice', text: `${comments.length} ${comments.length === 1 ? 'comment' : 'comments'} copied with source locations.` });
         break;
       }
+      case 'maximize': await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup'); break;
       case 'jump':
         if (comment) {
           if (!sameComparison(comment, this.state)) {

@@ -16,6 +16,7 @@ interface UIState {
   matchCase: boolean;
   wordWrap: boolean;
   theme: 'light' | 'dark';
+  canMaximize: boolean;
   notice?: { text: string; error?: boolean };
   pulseSequence: number;
   reveal?: { commentId: string; rowId?: string; sequence: number };
@@ -57,6 +58,7 @@ const initialState: UIState = {
   filesOpen: false,
   commentsOpen: true,
   pulseSequence: 0,
+  canMaximize: false,
   query: initialLocalState.query ?? '',
   regex: initialLocalState.regex ?? false,
   matchCase: initialLocalState.matchCase ?? false,
@@ -78,6 +80,7 @@ function reducer(state: UIState, action: Action): UIState {
           if (state.loadingReview && (message.state.repository !== state.loadingReview.repository || message.state.baseRef !== state.loadingReview.baseRef || message.state.endRef !== state.loadingReview.endRef || message.state.ignoreWhitespace !== state.loadingReview.ignoreWhitespace)) return state;
           return { ...state, review: message.state, loadingReview: undefined, activePath: message.state.files.some(file => file.path === state.activePath) ? state.activePath : message.state.files[0]?.path ?? '' };
         case 'busy': return { ...state, busy: message.busy };
+        case 'layout': return { ...state, canMaximize: message.canMaximize };
         case 'notice': return { ...state, notice: message };
         case 'saved': return { ...state, saving: false, draft: undefined, draftWarning: undefined };
         case 'saveFailed': return { ...state, saving: false };

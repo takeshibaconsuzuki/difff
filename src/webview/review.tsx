@@ -231,7 +231,7 @@ function ReviewApp() {
         post({ type: 'repository', root });
       }} onQuery={query => { dispatch({ type: 'query', query }); }} onRegex={() => { dispatch({ type: 'regex' }); }} onMatchCase={() => { dispatch({ type: 'matchCase' }); }}
       onMatch={search.move} onRefresh={() => post({ type: 'refresh' })} onCopy={() => post({ type: 'copy' })} onComments={() => { dispatch({ type: 'toggleComments' }); }}
-      onFiles={() => { dispatch({ type: 'filesOpen', open: !state.filesOpen }); }} onEscape={() => diff.current?.focus()} />
+      onFiles={() => { dispatch({ type: 'filesOpen', open: !state.filesOpen }); }} onEscape={() => diff.current?.focus()} canMaximize={state.canMaximize} onMaximize={() => post({ type: 'maximize' })} />
     <div id="search-error" role="status">{search.result.error}</div>
     <div id="workspace" className={`workspace${state.commentsOpen ? '' : ' hide-comments'}${state.filesOpen ? ' show-files' : ''}`}>
       <FilesPane key={JSON.stringify([repository, baseRef, endRef])} review={review} activePath={state.activePath} jump={jumpToFile} filterRef={fileFilter} />

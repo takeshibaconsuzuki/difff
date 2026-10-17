@@ -94,6 +94,32 @@ exports.run = async function run() {
       }
     }
 
+    // The maximize button spreads the review across the editor area in split layouts and restores the split on the next click.
+    const sidebar = page.locator('.monaco-workbench .part.sidebar');
+    const groups = page.locator('.monaco-workbench .part.editor .editor-group-container:visible');
+    const editorShare = () => page.locator('iframe.webview:visible').evaluate(node => node.getBoundingClientRect().width / node.ownerDocument.querySelector('.part.editor').getBoundingClientRect().width);
+    const maximize = review.getByRole('button', { name: 'Toggle maximized review', exact: true });
+    await expect(maximize).toBeDisabled();
+    const beside = await vscode.workspace.openTextDocument({ content: 'Split layout check' });
+    await vscode.window.showTextDocument(beside, { viewColumn: vscode.ViewColumn.Beside });
+    await expect(groups).toHaveCount(2);
+    await vscode.commands.executeCommand('difff.openReview');
+    await expect(maximize).toBeEnabled();
+    const splitShare = await editorShare();
+    expect(splitShare).toBeLessThan(0.7);
+    await maximize.click();
+    await expect(groups).toHaveCount(1);
+    await expect.poll(editorShare).toBeGreaterThan(0.95);
+    await expect(sidebar).toBeVisible();
+    await maximize.click();
+    await expect(groups).toHaveCount(2);
+    await expect.poll(editorShare).toBeLessThan(splitShare + 0.05);
+    await vscode.window.showTextDocument(beside);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    await expect(groups).toHaveCount(1);
+    await vscode.commands.executeCommand('difff.openReview');
+    await expect(maximize).toBeDisabled();
+
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     const document = await vscode.workspace.openTextDocument({ content: 'Shortcut scope check' });
     await vscode.window.showTextDocument(document);
@@ -104,5 +130,5 @@ exports.run = async function run() {
   } finally {
     await browser.close();
   }
-  console.log('Passed: review lifecycle, scoped keyboard shortcuts, and opening working files in every scope in VS Code.');
+  console.log('Passed: review lifecycle, scoped keyboard shortcuts, maximizing the review across editor groups, and opening working files in every scope in VS Code.');
 };

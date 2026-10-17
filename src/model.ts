@@ -71,7 +71,8 @@ export type HostMessage =
   | { type: 'notice'; text: string; error?: boolean }
   | { type: 'reveal'; comment: ReviewComment }
   | { type: 'saveFailed' }
-  | { type: 'saved' };
+  | { type: 'saved' }
+  | { type: 'layout'; canMaximize: boolean };
 
 export interface Comparison {
   baseRef: string;

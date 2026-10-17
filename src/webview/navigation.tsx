@@ -1,5 +1,5 @@
 import { memo, useState, type RefObject } from 'react';
-import { Moon, Search, Sun, WrapText } from 'lucide-react';
+import { Maximize2, Moon, Search, Sun, WrapText } from 'lucide-react';
 import { sameComparison, type ReviewState } from '../model';
 import { Button, FileStatus } from './ui';
 
@@ -17,7 +17,7 @@ function ComparisonInput({ baseRef, endRef, busy, onApply }: { baseRef: string; 
 }
 
 export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, commentsOpen, filesOpen, searchCount, hasMatches, queryRef, theme, focused,
-  onComparison, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onIgnoreWhitespace, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme }: {
+  onComparison, onRepository, onQuery, onRegex, onMatchCase, onWordWrap, onIgnoreWhitespace, onMatch, onRefresh, onCopy, onComments, onFiles, onEscape, onTheme, canMaximize, onMaximize }: {
   review: ReviewState;
   busy: boolean;
   query: string;
@@ -45,6 +45,8 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
   onComments: () => void;
   onFiles: () => void;
   onEscape: () => void;
+  canMaximize: boolean;
+  onMaximize: () => void;
 }) {
   return <div className="toolbar">
     <div className="review-selection">
@@ -75,6 +77,7 @@ export function Toolbar({ review, busy, query, regex, matchCase, wordWrap, comme
     <Button id="toggle-theme" className="icon-button" title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} aria-pressed={theme === 'dark'} onClick={onTheme}>
       {theme === 'dark' ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
     </Button>
+    <Button id="maximize" className="icon-button" title={canMaximize ? 'Toggle maximized review across the editor area' : 'The review already fills the editor area'} aria-label="Toggle maximized review" disabled={!canMaximize} onClick={onMaximize}><Maximize2 size={16} aria-hidden="true" /></Button>
     <span id="focus-status" className={`focus-status${focused ? ' focused' : ''}`} role="status" aria-label={focused ? 'Review focused: keyboard shortcuts active' : 'Review not focused: click the review to use keyboard shortcuts'} title={focused ? 'Review focused — keyboard shortcuts active' : 'Review not focused — click here to use keyboard shortcuts'} />
   </div>;
 }

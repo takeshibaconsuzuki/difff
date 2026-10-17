@@ -31,7 +31,7 @@ function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisa
     } },
     commands: { registerCommand: (_name, callback) => { open = callback; return disposable; } },
     env: { clipboard: { writeText: async text => { copied = text; } } },
-    window: { createWebviewPanel: () => ({
+    window: { tabGroups: { all: [{}], onDidChangeTabGroups: () => disposable }, createWebviewPanel: () => ({
       webview: {
         asWebviewUri: value => value,
         onDidReceiveMessage: callback => { receive = callback; return disposable; },
