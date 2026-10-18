@@ -110,8 +110,48 @@ exports.run = async function run() {
     await maximize.click();
     await expect(groups).toHaveCount(1);
     await expect.poll(editorShare).toBeGreaterThan(0.95);
+    await expect(review.locator('#focus-status')).toHaveClass(/focused/);
     await expect(sidebar).toBeVisible();
     await maximize.click();
+    await expect(groups).toHaveCount(2);
+    await expect.poll(editorShare).toBeLessThan(splitShare + 0.05);
+
+    // Losing review focus restores the split without taking focus back from the destination.
+    await maximize.click();
+    await expect(groups).toHaveCount(1);
+    await vscode.commands.executeCommand('workbench.action.focusSideBar');
+    await expect(groups).toHaveCount(2);
+    await expect.poll(() => sidebar.evaluate(node => node.contains(node.ownerDocument.activeElement))).toBe(true);
+    await diff.focus();
+    await expect(diff).toHaveAttribute('aria-busy', 'false');
+    await expect(groups).toHaveCount(2);
+
+    await maximize.click();
+    await expect(groups).toHaveCount(1);
+    await page.keyboard.press(`${modifier}+Shift+p`);
+    await expect(quickInput).toBeVisible();
+    await expect(groups).toHaveCount(2);
+    await expect(quickInput.locator('input').first()).toBeFocused();
+    await page.keyboard.press('Escape');
+    await diff.focus();
+    await expect(groups).toHaveCount(2);
+
+    await maximize.click();
+    await expect(groups).toHaveCount(1);
+    await vscode.commands.executeCommand('workbench.action.terminal.focus');
+    await expect(groups).toHaveCount(2);
+    await expect.poll(() => page.locator('.part.panel').evaluate(node => node.contains(node.ownerDocument.activeElement))).toBe(true);
+    await vscode.commands.executeCommand('workbench.action.closePanel');
+    await diff.focus();
+    await expect(groups).toHaveCount(2);
+
+    await maximize.click();
+    await expect(groups).toHaveCount(1);
+    await vscode.window.showTextDocument(beside);
+    await expect(groups).toHaveCount(2);
+    assert.equal(vscode.window.activeTextEditor?.document, beside);
+    await vscode.commands.executeCommand('difff.openReview');
+    await diff.focus();
     await expect(groups).toHaveCount(2);
     await expect.poll(editorShare).toBeLessThan(splitShare + 0.05);
     await vscode.window.showTextDocument(beside);
@@ -130,5 +170,5 @@ exports.run = async function run() {
   } finally {
     await browser.close();
   }
-  console.log('Passed: review lifecycle, scoped keyboard shortcuts, maximizing the review across editor groups, and opening working files in every scope in VS Code.');
+  console.log('Passed: review lifecycle, scoped keyboard shortcuts, maximizing and restoring on focus loss, and opening working files in every scope in VS Code.');
 };

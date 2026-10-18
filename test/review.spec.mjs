@@ -1037,10 +1037,14 @@ test('the focus dot tracks real focus entering and leaving the review frame', as
   await expect(indicator).toHaveClass(/focused/);
   const green = await indicator.evaluate(node => getComputedStyle(node).backgroundColor);
   expect(green).not.toBe(grey);
+  const blurCount = () => review.locator('body').evaluate(() => window.messages.filter(message => message.type === 'blur').length);
+  const before = await blurCount();
   await page.keyboard.press('Control+f');
   await expect(review.getByRole('textbox', { name: 'Find in diff' })).toBeFocused();
+  expect(await blurCount()).toBe(before);
   await page.locator('#outside').click();
   await expect(indicator).not.toHaveClass(/focused/);
+  await expect.poll(blurCount).toBe(before + 1);
   expect(await indicator.evaluate(node => getComputedStyle(node).backgroundColor)).toBe(grey);
 });
 

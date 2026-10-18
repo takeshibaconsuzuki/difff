@@ -34,6 +34,7 @@ export const messageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('clear') }),
   z.object({ type: z.literal('copy') }),
   z.object({ type: z.literal('maximize') }),
+  z.object({ type: z.literal('blur') }),
   z.object({ type: z.literal('jump'), id: z.string() }),
   anchorSchema.omit({ side: true }).extend({ type: z.literal('open') }),
 ]);

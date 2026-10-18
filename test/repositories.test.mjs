@@ -11,16 +11,20 @@ const { outputFiles } = await build({
   external: ['vscode', 'simple-git', './git'], logLevel: 'silent',
 });
 
-function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisabled = false }) {
+function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisabled = false, groupCount = 1 }) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const uri = fsPath => ({ scheme: 'file', fsPath, toString: () => fsPath });
   const disposable = { dispose() {} };
   const storage = new Map([['difff.comments.v1', comments]]);
   const messages = [];
+  const commands = [];
+  const groups = Array.from({ length: groupCount }, () => ({}));
+  const layout = { orientation: 0, groups: groups.map(() => ({ size: 300 })) };
   let receive;
   let open;
   let copied;
   let done;
+  let windowStateChanged;
   const vscode = {
     Uri: { joinPath: (base, ...parts) => uri(paths.join(base.fsPath, ...parts)) },
     ThemeIcon: class {},
@@ -29,9 +33,13 @@ function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisa
     extensions: { getExtension: () => gitDisabled ? undefined : {
       activate: async () => ({ getAPI: () => ({ repositories: gitRoots.map(root => ({ rootUri: uri(root) })) }) }),
     } },
-    commands: { registerCommand: (_name, callback) => { open = callback; return disposable; } },
+    commands: {
+      registerCommand: (_name, callback) => { open = callback; return disposable; },
+      executeCommand: async (name, ...args) => { commands.push({ name, args }); if (name === 'vscode.getEditorLayout') return layout; },
+    },
     env: { clipboard: { writeText: async text => { copied = text; } } },
-    window: { tabGroups: { all: [{}], onDidChangeTabGroups: () => disposable }, createWebviewPanel: () => ({
+    window: { onDidChangeWindowState: callback => { windowStateChanged = callback; return disposable; }, tabGroups: { all: groups, onDidChangeTabGroups: () => disposable }, createWebviewPanel: () => ({
+      active: true,
       webview: {
         asWebviewUri: value => value,
         onDidReceiveMessage: callback => { receive = callback; return disposable; },
@@ -41,6 +49,7 @@ function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisa
         },
       },
       onDidDispose: () => disposable,
+      onDidChangeViewState: () => disposable,
     }) },
   };
   const module = { exports: {} };
@@ -71,8 +80,28 @@ function reviewHost({ platform, workspaceRoots, gitRoots, comments = [], gitDisa
     get state() { return messages.findLast(message => message.type === 'state')?.state; },
     get copied() { return copied; },
     get comments() { return storage.get('difff.comments.v1'); },
+    get commands() { return commands; },
+    get layout() { return layout; },
+    get groups() { return groups; },
+    async loseWindowFocus() { await new Promise(resolve => { done = resolve; windowStateChanged({ focused: false }); }); },
   };
 }
+
+test('losing application focus restores the saved split once and never remaximizes on repeated blur', async () => {
+  const host = reviewHost({ platform: 'linux', workspaceRoots: ['/work'], gitRoots: ['/work'], groupCount: 2 });
+  await host.send({ type: 'maximize' });
+  await host.loseWindowFocus();
+  assert.deepEqual(host.commands.map(command => command.name), ['vscode.getEditorLayout', 'workbench.action.toggleMaximizeEditorGroup', 'vscode.setEditorLayout']);
+  assert.deepEqual(host.commands.at(-1).args, [host.layout]);
+  await host.send({ type: 'blur' });
+  await host.loseWindowFocus();
+  assert.equal(host.commands.length, 3);
+
+  await host.send({ type: 'maximize' });
+  host.groups.push({});
+  await host.send({ type: 'blur' });
+  assert.equal(host.commands.at(-1).name, 'workbench.action.toggleMaximizeEditorGroup', 'Restoring must not remove a newly created group');
+});
 
 test('Windows root defaults retain saved repository identities and comment actions', async () => {
   const root = 'e:\\Devel\\difff';

@@ -26,6 +26,7 @@ class ReviewPanel implements vscode.Disposable {
   private gitReview?: GitReview;
   private queue = Promise.resolve();
   private closed = false;
+  private maximizedLayout?: { layout: unknown; groups: readonly vscode.TabGroup[] };
 
   constructor(private readonly context: vscode.ExtensionContext, onClose: () => void) {
     this.comments = commentSchema.array().safeParse(context.workspaceState.get<unknown>(STORAGE_KEY, [])).data ?? [];
@@ -40,18 +41,11 @@ class ReviewPanel implements vscode.Disposable {
       this.panel.webview.onDidReceiveMessage((raw: unknown) => {
         const parsed = messageSchema.safeParse(raw);
         if (!parsed.success) return;
-        this.queue = this.queue.then(async () => {
-          if (this.closed) return;
-          this.send({ type: 'busy', busy: true });
-          try { await this.handle(parsed.data); }
-          catch (error) {
-            this.send({ type: 'notice', text: error instanceof Error ? error.message : String(error), error: true });
-            if (parsed.data.type === 'comment' || parsed.data.type === 'edit') this.send({ type: 'saveFailed' });
-          }
-          finally { this.send({ type: 'busy', busy: false }); }
-        });
+        this.enqueue(parsed.data);
       }),
       vscode.window.tabGroups.onDidChangeTabGroups(() => { this.sendLayout(); }),
+      this.panel.onDidChangeViewState(() => { if (!this.panel.active) this.enqueue({ type: 'blur' }); }),
+      vscode.window.onDidChangeWindowState(state => { if (!state.focused) this.enqueue({ type: 'blur' }); }),
       this.panel.onDidDispose(() => {
         this.closed = true;
         this.disposables.forEach(disposable => { disposable.dispose(); });
@@ -63,6 +57,18 @@ class ReviewPanel implements vscode.Disposable {
   dispose(): void { this.panel.dispose(); }
   reveal(): void { this.panel.reveal(); }
   private send(message: HostMessage): void { if (!this.closed) void this.panel.webview.postMessage(message); }
+  private enqueue(message: ClientMessage): void {
+    this.queue = this.queue.then(async () => {
+      if (this.closed) return;
+      this.send({ type: 'busy', busy: true });
+      try { await this.handle(message); }
+      catch (error) {
+        this.send({ type: 'notice', text: error instanceof Error ? error.message : String(error), error: true });
+        if (message.type === 'comment' || message.type === 'edit') this.send({ type: 'saveFailed' });
+      }
+      finally { this.send({ type: 'busy', busy: false }); }
+    });
+  }
   private publish(): void {
     this.state.comments = this.comments.filter(comment => comment.repository === this.state.repository);
     this.send({ type: 'state', state: this.state });
@@ -133,6 +139,15 @@ class ReviewPanel implements vscode.Disposable {
   // Maximizing only applies to split layouts: with one group the review already fills the editor area.
   private sendLayout(): void { this.send({ type: 'layout', canMaximize: vscode.window.tabGroups.all.length > 1 }); }
 
+  private async restoreLayout(): Promise<void> {
+    const saved = this.maximizedLayout;
+    this.maximizedLayout = undefined;
+    // A newly split or closed group already changes the layout; don't recreate or merge groups.
+    if (saved && saved.groups.length === vscode.window.tabGroups.all.length && saved.groups.every((group, index) => group === vscode.window.tabGroups.all[index])) {
+      await vscode.commands.executeCommand('vscode.setEditorLayout', saved.layout);
+    }
+  }
+
   private async handle(message: ClientMessage): Promise<void> {
     const git = () => this.gitReview ?? new GitReview(this.state.repository, this.state.ignoreWhitespace);
     const comment = 'id' in message ? this.comments.find(item => item.id === message.id && item.repository === this.state.repository) : undefined;
@@ -199,7 +214,15 @@ class ReviewPanel implements vscode.Disposable {
         this.send({ type: 'notice', text: `${comments.length} ${comments.length === 1 ? 'comment' : 'comments'} copied with source locations.` });
         break;
       }
-      case 'maximize': await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup'); break;
+      case 'maximize':
+        if (this.maximizedLayout) await this.restoreLayout();
+        else if (this.panel.active && vscode.window.tabGroups.all.length > 1) {
+          const layout = await vscode.commands.executeCommand<unknown>('vscode.getEditorLayout');
+          this.maximizedLayout = { layout, groups: [...vscode.window.tabGroups.all] };
+          await vscode.commands.executeCommand('workbench.action.toggleMaximizeEditorGroup');
+        }
+        break;
+      case 'blur': await this.restoreLayout(); break;
       case 'jump':
         if (comment) {
           if (!sameComparison(comment, this.state)) {

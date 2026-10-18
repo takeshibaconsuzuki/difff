@@ -30,6 +30,15 @@ function ReviewApp() {
   const search = useDiffSearch(review.files, state.query, state.regex, state.matchCase);
   const focused = usePageFocus();
 
+  useEffect(() => {
+    if (focused) return;
+    // VS Code briefly blurs and refocuses the webview while maximizing its group.
+    const timer = window.setTimeout(() => {
+      if (!document.hasFocus() || document.visibilityState !== 'visible') post({ type: 'blur' });
+    }, 100);
+    return () => { window.clearTimeout(timer); };
+  }, [focused]);
+
   useLayoutEffect(() => { document.documentElement.dataset.theme = state.theme; }, [state.theme]);
 
   useLayoutEffect(() => {
